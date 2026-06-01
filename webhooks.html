@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Webhooks · RevOps Agent Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">Webhook Ingestion</h1>
+        <p class="page-sub">Inbound events from Zoom, Slack, Salesforce, and Gong.</p>
+      </div>
+      <div id="range"></div>
+    </div>
+
+    <div id="err" class="banner"></div>
+    <div class="kpis" id="kpis" data-loads></div>
+
+    <div class="grid">
+      <div class="panel col-8" data-loads>
+        <h3>Events over time</h3>
+        <p class="hint">Stacked by source.</p>
+        <div class="chart-wrap"><canvas id="c_time"></canvas></div>
+      </div>
+      <div class="panel col-4" data-loads>
+        <h3>By source</h3>
+        <p class="hint">Share of inbound volume.</p>
+        <div class="chart-wrap"><canvas id="c_source"></canvas></div>
+      </div>
+
+      <div class="panel col-6" data-loads>
+        <h3>Processing status by source</h3>
+        <p class="hint">Processed vs received vs failed.</p>
+        <div class="chart-wrap"><canvas id="c_status"></canvas></div>
+      </div>
+      <div class="panel col-6" data-loads>
+        <h3>Failure rate by source</h3>
+        <p class="hint">Share of events that failed.</p>
+        <div class="chart-wrap"><canvas id="c_fail"></canvas></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Source breakdown</h3>
+        <p class="hint">Volume, processing outcome, and recency per source.</p>
+        <div id="tbl"></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Recent failures</h3>
+        <p class="hint">Most recent failed events in range.</p>
+        <div id="tbl_fail"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script>
+    RevOps.nav('webhooks.html');
+    RevOps.applyChartDefaults();
+
+    async function load(range) {
+      const { fromISO, toISO, bucket } = range;
+      const p = [fromISO, toISO];
+      RevOps.setLoading(true);
+      try {
+        const [kpi] = await RevOps.sql('webhooks', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE status='processed') processed,
+                 count(*) FILTER (WHERE status='failed') failed,
+                 count(DISTINCT source) sources
+          FROM webhook_events WHERE received_at >= $1 AND received_at < $2`, p);
+        const failRate = Number(kpi.total) ? (100 * kpi.failed / kpi.total) : null;
+        RevOps.kpis('kpis', [
+          { label: 'Total events', value: RevOps.fmt.compact(kpi.total) },
+          { label: 'Processed', value: RevOps.fmt.compact(kpi.processed),
+            sub: Number(kpi.total) ? RevOps.fmt.pct(100 * kpi.processed / kpi.total) + ' of total' : '' },
+          { label: 'Failed', value: RevOps.fmt.num(kpi.failed),
+            tone: failRate == null ? '' : failRate >= 5 ? 'bad' : failRate > 0 ? 'warn' : 'ok',
+            sub: failRate == null ? '' : RevOps.fmt.pct(failRate) + ' fail rate' },
+          { label: 'Active sources', value: RevOps.fmt.num(kpi.sources) }
+        ]);
+
+        // Over time stacked by source
+        const ts = await RevOps.sql('webhooks', `
+          SELECT date_trunc($3, received_at) bucket, source, count(*) c
+          FROM webhook_events WHERE received_at >= $1 AND received_at < $2
+          GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
+        const pv = RevOps.pivot(ts, 'source', 'c');
+        RevOps.chart('c_time', {
+          type: 'bar',
+          data: { labels: pv.labels.map(l => RevOps.bucketLabel(l, bucket)),
+            datasets: pv.order.map(s => ({ label: s, data: pv.datasetFor(s),
+              backgroundColor: RevOps.colorFor(s), borderRadius: 3, barPercentage: 0.9, categoryPercentage: 0.85 })) },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }),
+            y: RevOps.axes.yStacked({ ticks: { callback: v => RevOps.fmt.compact(v) } }) },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        // By source
+        const bySource = await RevOps.sql('webhooks', `
+          SELECT source, count(*) total,
+                 count(*) FILTER (WHERE status='processed') processed,
+                 count(*) FILTER (WHERE status='received') received,
+                 count(*) FILTER (WHERE status='failed') failed,
+                 max(received_at) last
+          FROM webhook_events WHERE received_at >= $1 AND received_at < $2
+          GROUP BY source ORDER BY total DESC`, p);
+
+        RevOps.chart('c_source', {
+          type: 'doughnut',
+          data: { labels: bySource.map(r => r.source),
+            datasets: [{ data: bySource.map(r => Number(r.total)),
+              backgroundColor: bySource.map(r => RevOps.colorFor(r.source)), borderWidth: 0 }] },
+          options: { cutout: '62%', plugins: { legend: { position: 'bottom' } } }
+        });
+        RevOps.chart('c_status', {
+          type: 'bar',
+          data: { labels: bySource.map(r => r.source),
+            datasets: [
+              { label: 'Processed', data: bySource.map(r => Number(r.processed)), backgroundColor: '#34d399', borderRadius: 3 },
+              { label: 'Received', data: bySource.map(r => Number(r.received)), backgroundColor: '#fbbf24', borderRadius: 3 },
+              { label: 'Failed', data: bySource.map(r => Number(r.failed)), backgroundColor: '#f87171', borderRadius: 3 }
+            ] },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }),
+            y: RevOps.axes.yStacked({ ticks: { callback: v => RevOps.fmt.compact(v) } }) },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+        RevOps.chart('c_fail', {
+          type: 'bar',
+          data: { labels: bySource.map(r => r.source),
+            datasets: [{ label: 'Failure rate (%)',
+              data: bySource.map(r => Number(r.total) ? +(100 * r.failed / r.total).toFixed(2) : 0),
+              backgroundColor: bySource.map(r => {
+                const v = Number(r.total) ? 100 * r.failed / r.total : 0;
+                return v >= 5 ? '#f87171' : v > 0 ? '#fbbf24' : '#34d399';
+              }), borderRadius: 3 }] },
+          options: { scales: { x: RevOps.axes.x(), y: RevOps.axes.y({ ticks: { callback: v => v + '%' } }) },
+            plugins: { legend: { display: false } } }
+        });
+
+        RevOps.table('tbl', [
+          { key: 'source', label: 'Source', render: r => RevOps.badge(r.source, 'blue') },
+          { key: 'total', label: 'Events', num: true, render: r => RevOps.fmt.num(r.total) },
+          { key: 'processed', label: 'Processed', num: true, render: r => RevOps.fmt.num(r.processed) },
+          { key: 'received', label: 'Received', num: true, render: r => RevOps.fmt.num(r.received) },
+          { key: 'failed', label: 'Failed', num: true, render: r => RevOps.fmt.num(r.failed) },
+          { key: 'last', label: 'Last event', render: r => RevOps.fmt.rel(r.last) }
+        ], bySource);
+
+        // Recent failures
+        const fails = await RevOps.sql('webhooks', `
+          SELECT received_at, source, source_event_type, error
+          FROM webhook_events WHERE received_at >= $1 AND received_at < $2 AND status='failed'
+          ORDER BY received_at DESC LIMIT 50`, p);
+        RevOps.table('tbl_fail', [
+          { key: 'received_at', label: 'When', render: r => RevOps.fmt.dt(r.received_at) },
+          { key: 'source', label: 'Source', render: r => RevOps.badge(r.source, 'gray') },
+          { key: 'source_event_type', label: 'Type', render: r => `<span class="mono">${(r.source_event_type || '—').slice(0, 60)}</span>` },
+          { key: 'error', label: 'Error', render: r => (r.error || '—').slice(0, 80) }
+        ], fails, 'No failed events in range. 🎉');
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    const dr = RevOps.DateRange('range', load);
+    RevOps.autoRefresh(() => load(dr.get()), 60000);
+  </script>
+</body>
+</html>

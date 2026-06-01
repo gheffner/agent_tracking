@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>RevOps Agent Platform — Observability</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div id="err" class="banner"></div>
+
+    <div class="hub-hero">
+      <h1>Agent Platform Observability</h1>
+      <p>Live reporting on the RevOps agent platform — runs, LLM spend, tool reliability, webhook ingestion, and decision quality. Reads directly from the production RDS via the internal SQL proxy.</p>
+    </div>
+
+    <div class="kpis" id="pulse" data-loads>
+      <div class="kpi"><div class="label">Loading…</div><div class="value">—</div></div>
+    </div>
+
+    <div class="section-label">Dashboards</div>
+    <div class="hub-grid">
+      <a class="hub-card" href="agent_runs.html">
+        <div class="ic">🤖</div>
+        <h3>Agent Runs</h3>
+        <p>Run volume over time, success/failure rates per agent, status mix, duration and cost per run.</p>
+        <div class="tables"><code>runs.agent_runs</code> <code>run_events</code></div>
+      </a>
+      <a class="hub-card" href="llm_usage.html">
+        <div class="ic">💸</div>
+        <h3>LLM Cost &amp; Usage</h3>
+        <p>Spend by model over time, token volume, prompt-cache savings, latency, and cost attributed to each agent.</p>
+        <div class="tables"><code>runs.llm_calls</code></div>
+      </a>
+      <a class="hub-card" href="tool_calls.html">
+        <div class="ic">🛠️</div>
+        <h3>Tool Calls</h3>
+        <p>Tool success rates, latency by tool (incl. slow external APIs), top tools by volume, and error breakdown.</p>
+        <div class="tables"><code>runs.tool_calls</code></div>
+      </a>
+      <a class="hub-card" href="webhooks.html">
+        <div class="ic">📡</div>
+        <h3>Webhook Ingestion</h3>
+        <p>Inbound events by source (Zoom, Slack, Salesforce, Gong), throughput over time, processed vs failed rate.</p>
+        <div class="tables"><code>webhook_events</code></div>
+      </a>
+      <a class="hub-card" href="decisions.html">
+        <div class="ic">⚖️</div>
+        <h3>Decisions &amp; Approvals</h3>
+        <p>Agent recommendations vs human outcomes, agreement rate, and human-in-the-loop approval SLA.</p>
+        <div class="tables"><code>decisions.records</code> <code>runs.approvals</code></div>
+      </a>
+    </div>
+
+    <div class="section-label">Platform Controls</div>
+    <div class="grid">
+      <div class="panel col-6" data-loads>
+        <h3>Kill switches</h3>
+        <p class="hint">Safety halts. Active switches stop matching agents from running.</p>
+        <div id="kills"></div>
+      </div>
+      <div class="panel col-6" data-loads>
+        <h3>Spend caps</h3>
+        <p class="hint">Budget ceilings enforced by the runtime, by scope.</p>
+        <div id="caps"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script>
+    RevOps.nav('index.html');
+
+    async function load() {
+      RevOps.setLoading(true);
+      try {
+        const [pulse] = await RevOps.sql('agent', `
+          SELECT
+            (SELECT count(*) FROM runs.agent_runs WHERE started_at >= now()-interval '24 hours') runs_24h,
+            (SELECT round(sum(cost_usd),2) FROM runs.llm_calls WHERE started_at >= now()-interval '7 days') cost_7d,
+            (SELECT count(*) FROM core.agents WHERE is_active) active_agents,
+            (SELECT count(*) FROM core.kill_switches WHERE active) kills_active`);
+        const [wh] = await RevOps.sql('webhooks',
+          `SELECT count(*) ev_24h FROM webhook_events WHERE received_at >= now()-interval '24 hours'`);
+
+        RevOps.kpis('pulse', [
+          { label: 'Agent runs · 24h', value: RevOps.fmt.num(pulse.runs_24h) },
+          { label: 'LLM spend · 7d', value: RevOps.fmt.usd(pulse.cost_7d) },
+          { label: 'Webhook events · 24h', value: RevOps.fmt.compact(wh.ev_24h) },
+          { label: 'Active agents', value: RevOps.fmt.num(pulse.active_agents) },
+          { label: 'Kill switches active', value: RevOps.fmt.num(pulse.kills_active),
+            tone: Number(pulse.kills_active) > 0 ? 'bad' : 'ok' }
+        ]);
+
+        const kills = await RevOps.sql('agent',
+          `SELECT key, active, reason, set_by FROM core.kill_switches ORDER BY active DESC, key`);
+        RevOps.table('kills',
+          [
+            { key: 'key', label: 'Switch', render: r => `<span class="mono">${r.key}</span>` },
+            { key: 'active', label: 'State', render: r => r.active ? RevOps.badge('ACTIVE', 'red') : RevOps.badge('off', 'gray') },
+            { key: 'reason', label: 'Trigger', render: r => r.reason || '—' }
+          ], kills);
+
+        const caps = await RevOps.sql('agent',
+          `SELECT scope_kind, scope_id, cap_usd FROM core.spend_caps ORDER BY cap_usd DESC`);
+        RevOps.table('caps',
+          [
+            { key: 'scope_kind', label: 'Scope', render: r => RevOps.badge(r.scope_kind, 'blue') },
+            { key: 'scope_id', label: 'Target', render: r => `<span class="mono">${r.scope_id}</span>` },
+            { key: 'cap_usd', label: 'Cap', num: true, render: r => RevOps.fmt.usd(r.cap_usd) }
+          ], caps);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    load();
+    RevOps.autoRefresh(load, 60000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Usage · RevOps Agent Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">LLM Cost &amp; Usage</h1>
+        <p class="page-sub">Spend, tokens, cache savings, and latency across every model call.</p>
+      </div>
+      <div id="range"></div>
+    </div>
+
+    <div id="err" class="banner"></div>
+    <div class="kpis" id="kpis" data-loads></div>
+
+    <div class="grid">
+      <div class="panel col-8" data-loads>
+        <h3>Spend over time</h3>
+        <p class="hint">Daily/hourly cost, stacked by model.</p>
+        <div class="chart-wrap"><canvas id="c_cost_time"></canvas></div>
+      </div>
+      <div class="panel col-4" data-loads>
+        <h3>Cost by model</h3>
+        <p class="hint">Share of spend.</p>
+        <div class="chart-wrap"><canvas id="c_cost_model"></canvas></div>
+      </div>
+
+      <div class="panel col-8" data-loads>
+        <h3>Token volume over time</h3>
+        <p class="hint">Input, output, and cache-read tokens.</p>
+        <div class="chart-wrap"><canvas id="c_tokens"></canvas></div>
+      </div>
+      <div class="panel col-4" data-loads>
+        <h3>Avg latency by model</h3>
+        <p class="hint">Mean call latency.</p>
+        <div class="chart-wrap"><canvas id="c_lat"></canvas></div>
+      </div>
+
+      <div class="panel col-6" data-loads>
+        <h3>Cost by agent</h3>
+        <p class="hint">Spend attributed to the calling agent.</p>
+        <div class="chart-wrap"><canvas id="c_cost_agent"></canvas></div>
+      </div>
+      <div class="panel col-6" data-loads>
+        <h3>Calls by model</h3>
+        <p class="hint">Call volume.</p>
+        <div class="chart-wrap"><canvas id="c_calls_model"></canvas></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Model breakdown</h3>
+        <p class="hint">Per-model totals across the range.</p>
+        <div id="tbl"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script>
+    RevOps.nav('llm_usage.html');
+    RevOps.applyChartDefaults();
+
+    async function load(range) {
+      const { fromISO, toISO, bucket } = range;
+      const p = [fromISO, toISO];
+      RevOps.setLoading(true);
+      try {
+        const [kpi] = await RevOps.sql('agent', `
+          SELECT count(*) calls, round(sum(cost_usd),2) cost,
+                 sum(tokens_input) tin, sum(tokens_output) tout,
+                 sum(tokens_cache_read) cache_read, sum(tokens_cache_creation) cache_create,
+                 round(avg(latency_ms)) avg_lat
+          FROM runs.llm_calls WHERE started_at >= $1 AND started_at < $2`, p);
+
+        const cacheBase = Number(kpi.tin) + Number(kpi.cache_read || 0);
+        const cacheRate = cacheBase ? (100 * Number(kpi.cache_read || 0) / cacheBase) : null;
+        RevOps.kpis('kpis', [
+          { label: 'Total spend', value: RevOps.fmt.usd(kpi.cost) },
+          { label: 'LLM calls', value: RevOps.fmt.num(kpi.calls),
+            sub: kpi.calls ? RevOps.fmt.usd4(Number(kpi.cost) / Number(kpi.calls)) + ' / call' : '' },
+          { label: 'Tokens in', value: RevOps.fmt.compact(kpi.tin) },
+          { label: 'Tokens out', value: RevOps.fmt.compact(kpi.tout) },
+          { label: 'Cache-read share', value: cacheRate == null ? '—' : RevOps.fmt.pct(cacheRate),
+            tone: cacheRate >= 50 ? 'ok' : '', sub: RevOps.fmt.compact(kpi.cache_read) + ' cached tokens' },
+          { label: 'Avg latency', value: RevOps.fmt.ms(kpi.avg_lat) }
+        ]);
+
+        // Spend over time stacked by model
+        const ct = await RevOps.sql('agent', `
+          SELECT date_trunc($3, started_at) bucket, model_id, round(sum(cost_usd),4) c
+          FROM runs.llm_calls WHERE started_at >= $1 AND started_at < $2
+          GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
+        const pv = RevOps.pivot(ct, 'model_id', 'c');
+        RevOps.chart('c_cost_time', {
+          type: 'bar',
+          data: { labels: pv.labels.map(l => RevOps.bucketLabel(l, bucket)),
+            datasets: pv.order.map(m => ({ label: m, data: pv.datasetFor(m),
+              backgroundColor: RevOps.colorFor(m), borderRadius: 3, barPercentage: 0.9, categoryPercentage: 0.85 })) },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }),
+            y: RevOps.axes.yStacked({ ticks: { callback: v => '$' + v } }) },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        // By model
+        const byModel = await RevOps.sql('agent', `
+          SELECT model_id, count(*) calls, round(sum(cost_usd),2) cost,
+                 sum(tokens_input) tin, sum(tokens_output) tout, sum(tokens_cache_read) cache,
+                 round(avg(latency_ms)) avg_lat
+          FROM runs.llm_calls WHERE started_at >= $1 AND started_at < $2
+          GROUP BY model_id ORDER BY cost DESC`, p);
+
+        RevOps.chart('c_cost_model', {
+          type: 'doughnut',
+          data: { labels: byModel.map(r => r.model_id),
+            datasets: [{ data: byModel.map(r => Number(r.cost) || 0),
+              backgroundColor: byModel.map(r => RevOps.colorFor(r.model_id)), borderWidth: 0 }] },
+          options: { cutout: '62%', plugins: { legend: { position: 'bottom' } } }
+        });
+        RevOps.chart('c_lat', {
+          type: 'bar',
+          data: { labels: byModel.map(r => r.model_id),
+            datasets: [{ label: 'Avg latency (ms)', data: byModel.map(r => Number(r.avg_lat) || 0),
+              backgroundColor: byModel.map(r => RevOps.colorFor(r.model_id)), borderRadius: 3 }] },
+          options: { indexAxis: 'y', scales: { x: RevOps.axes.y(), y: RevOps.axes.x() },
+            plugins: { legend: { display: false } } }
+        });
+        RevOps.chart('c_calls_model', {
+          type: 'bar',
+          data: { labels: byModel.map(r => r.model_id),
+            datasets: [{ label: 'Calls', data: byModel.map(r => Number(r.calls)),
+              backgroundColor: byModel.map(r => RevOps.colorFor(r.model_id)), borderRadius: 3 }] },
+          options: { scales: { x: RevOps.axes.x(), y: RevOps.axes.y() }, plugins: { legend: { display: false } } }
+        });
+
+        // Tokens over time
+        const tt = await RevOps.sql('agent', `
+          SELECT date_trunc($3, started_at) bucket,
+                 sum(tokens_input) tin, sum(tokens_output) tout, sum(tokens_cache_read) cache
+          FROM runs.llm_calls WHERE started_at >= $1 AND started_at < $2
+          GROUP BY 1 ORDER BY 1`, [...p, bucket]);
+        RevOps.chart('c_tokens', {
+          type: 'line',
+          data: { labels: tt.map(r => RevOps.bucketLabel(r.bucket, bucket)),
+            datasets: [
+              { label: 'Input', data: tt.map(r => Number(r.tin) || 0), borderColor: '#6366f1', backgroundColor: 'rgba(99,102,241,.12)', fill: true, tension: .3, borderWidth: 2, pointRadius: 0 },
+              { label: 'Cache read', data: tt.map(r => Number(r.cache) || 0), borderColor: '#22d3ee', backgroundColor: 'transparent', tension: .3, borderWidth: 2, pointRadius: 0 },
+              { label: 'Output', data: tt.map(r => Number(r.tout) || 0), borderColor: '#34d399', backgroundColor: 'transparent', tension: .3, borderWidth: 2, pointRadius: 0 }
+            ] },
+          options: { interaction: { mode: 'index', intersect: false },
+            scales: { x: RevOps.axes.x(), y: RevOps.axes.y({ ticks: { callback: v => RevOps.fmt.compact(v) } }) },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        // Cost by agent
+        const byAgent = await RevOps.sql('agent', `
+          SELECT r.agent_ref, round(sum(l.cost_usd),2) cost, count(*) calls
+          FROM runs.llm_calls l JOIN runs.agent_runs r ON r.run_id = l.run_id
+          WHERE l.started_at >= $1 AND l.started_at < $2
+          GROUP BY r.agent_ref ORDER BY cost DESC`, p);
+        RevOps.chart('c_cost_agent', {
+          type: 'bar',
+          data: { labels: byAgent.map(r => r.agent_ref),
+            datasets: [{ label: 'Cost (USD)', data: byAgent.map(r => Number(r.cost) || 0),
+              backgroundColor: byAgent.map(r => RevOps.colorFor(r.agent_ref)), borderRadius: 3 }] },
+          options: { indexAxis: 'y', scales: { x: RevOps.axes.y({ ticks: { callback: v => '$' + v } }), y: RevOps.axes.x() },
+            plugins: { legend: { display: false } } }
+        });
+
+        // Model table
+        RevOps.table('tbl', [
+          { key: 'model_id', label: 'Model', render: r => `<span class="mono">${r.model_id}</span>` },
+          { key: 'calls', label: 'Calls', num: true, render: r => RevOps.fmt.num(r.calls) },
+          { key: 'tin', label: 'Tokens in', num: true, render: r => RevOps.fmt.compact(r.tin) },
+          { key: 'tout', label: 'Tokens out', num: true, render: r => RevOps.fmt.compact(r.tout) },
+          { key: 'cache', label: 'Cache read', num: true, render: r => RevOps.fmt.compact(r.cache) },
+          { key: 'avg_lat', label: 'Avg latency', num: true, render: r => RevOps.fmt.ms(r.avg_lat) },
+          { key: 'cost', label: 'Cost', num: true, render: r => RevOps.fmt.usd(r.cost) }
+        ], byModel);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    const dr = RevOps.DateRange('range', load);
+    RevOps.autoRefresh(() => load(dr.get()), 60000);
+  </script>
+</body>
+</html>

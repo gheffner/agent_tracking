@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tool Calls · RevOps Agent Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">Tool Calls</h1>
+        <p class="page-sub">Reliability and latency of every tool the agents invoke.</p>
+      </div>
+      <div id="range"></div>
+    </div>
+
+    <div id="err" class="banner"></div>
+    <div class="kpis" id="kpis" data-loads></div>
+
+    <div class="grid">
+      <div class="panel col-8" data-loads>
+        <h3>Tool calls over time</h3>
+        <p class="hint">Stacked by outcome.</p>
+        <div class="chart-wrap"><canvas id="c_time"></canvas></div>
+      </div>
+      <div class="panel col-4" data-loads>
+        <h3>Outcome mix</h3>
+        <p class="hint">Across the range.</p>
+        <div class="chart-wrap"><canvas id="c_status"></canvas></div>
+      </div>
+
+      <div class="panel col-6" data-loads>
+        <h3>Top tools by volume</h3>
+        <p class="hint">Most-invoked tools.</p>
+        <div class="chart-wrap"><canvas id="c_vol"></canvas></div>
+      </div>
+      <div class="panel col-6" data-loads>
+        <h3>Avg latency by tool</h3>
+        <p class="hint">Slow external APIs surface here.</p>
+        <div class="chart-wrap"><canvas id="c_lat"></canvas></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Tool breakdown</h3>
+        <p class="hint">Per-tool reliability and cost. Sorted by volume.</p>
+        <div id="tbl"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script>
+    RevOps.nav('tool_calls.html');
+    RevOps.applyChartDefaults();
+
+    async function load(range) {
+      const { fromISO, toISO, bucket } = range;
+      const p = [fromISO, toISO];
+      RevOps.setLoading(true);
+      try {
+        const [kpi] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE status='succeeded') ok,
+                 count(*) FILTER (WHERE status::text LIKE 'failed%') failed,
+                 round(avg(duration_ms)) avg_ms,
+                 round(sum(cost_usd),2) cost
+          FROM runs.tool_calls WHERE started_at >= $1 AND started_at < $2`, p);
+        const decided = Number(kpi.ok) + Number(kpi.failed);
+        const rate = decided ? (100 * kpi.ok / decided) : null;
+        RevOps.kpis('kpis', [
+          { label: 'Tool calls', value: RevOps.fmt.num(kpi.total) },
+          { label: 'Success rate', value: rate == null ? '—' : RevOps.fmt.pct(rate),
+            tone: rate == null ? '' : rate >= 95 ? 'ok' : rate >= 80 ? 'warn' : 'bad',
+            sub: `${RevOps.fmt.num(kpi.ok)} ok · ${RevOps.fmt.num(kpi.failed)} failed` },
+          { label: 'Avg latency', value: RevOps.fmt.ms(kpi.avg_ms) },
+          { label: 'Tool cost', value: RevOps.fmt.usd(kpi.cost) }
+        ]);
+
+        // Over time stacked by status
+        const ts = await RevOps.sql('agent', `
+          SELECT date_trunc($3, started_at) bucket, status::text status, count(*) c
+          FROM runs.tool_calls WHERE started_at >= $1 AND started_at < $2
+          GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
+        const pv = RevOps.pivot(ts, 'status', 'c');
+        RevOps.chart('c_time', {
+          type: 'bar',
+          data: { labels: pv.labels.map(l => RevOps.bucketLabel(l, bucket)),
+            datasets: pv.order.map(s => ({ label: s, data: pv.datasetFor(s),
+              backgroundColor: RevOps.statusColor(s), borderRadius: 3, barPercentage: 0.9, categoryPercentage: 0.85 })) },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }), y: RevOps.axes.yStacked() },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const byStatus = await RevOps.sql('agent', `
+          SELECT status::text status, count(*) c FROM runs.tool_calls
+          WHERE started_at >= $1 AND started_at < $2 GROUP BY 1 ORDER BY c DESC`, p);
+        RevOps.chart('c_status', {
+          type: 'doughnut',
+          data: { labels: byStatus.map(r => r.status),
+            datasets: [{ data: byStatus.map(r => Number(r.c)),
+              backgroundColor: byStatus.map(r => RevOps.statusColor(r.status)), borderWidth: 0 }] },
+          options: { cutout: '62%', plugins: { legend: { position: 'bottom' } } }
+        });
+
+        // By tool
+        const byTool = await RevOps.sql('agent', `
+          SELECT tool_name, count(*) total,
+                 count(*) FILTER (WHERE status='succeeded') ok,
+                 count(*) FILTER (WHERE status::text LIKE 'failed%') failed,
+                 round(avg(duration_ms)) avg_ms,
+                 round(sum(cost_usd),2) cost
+          FROM runs.tool_calls WHERE started_at >= $1 AND started_at < $2
+          GROUP BY tool_name ORDER BY total DESC`, p);
+
+        const top = byTool.slice(0, 12);
+        RevOps.chart('c_vol', {
+          type: 'bar',
+          data: { labels: top.map(r => r.tool_name),
+            datasets: [
+              { label: 'Succeeded', data: top.map(r => Number(r.ok)), backgroundColor: '#34d399', borderRadius: 3 },
+              { label: 'Failed', data: top.map(r => Number(r.failed)), backgroundColor: '#f87171', borderRadius: 3 }
+            ] },
+          options: { indexAxis: 'y', scales: { x: RevOps.axes.yStacked(), y: RevOps.axes.x({ stacked: true }) },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const byLat = [...byTool].filter(r => r.avg_ms != null).sort((a, b) => b.avg_ms - a.avg_ms).slice(0, 12);
+        RevOps.chart('c_lat', {
+          type: 'bar',
+          data: { labels: byLat.map(r => r.tool_name),
+            datasets: [{ label: 'Avg latency (ms)', data: byLat.map(r => Number(r.avg_ms) || 0),
+              backgroundColor: byLat.map(r => Number(r.avg_ms) > 10000 ? '#f87171' : Number(r.avg_ms) > 3000 ? '#fbbf24' : '#6366f1'),
+              borderRadius: 3 }] },
+          options: { indexAxis: 'y', scales: { x: RevOps.axes.y({ ticks: { callback: v => RevOps.fmt.ms(v) } }), y: RevOps.axes.x() },
+            plugins: { legend: { display: false } } }
+        });
+
+        RevOps.table('tbl', [
+          { key: 'tool_name', label: 'Tool', render: r => `<span class="mono">${r.tool_name}</span>` },
+          { key: 'total', label: 'Calls', num: true, render: r => RevOps.fmt.num(r.total) },
+          { key: 'ok', label: 'Succeeded', num: true, render: r => RevOps.fmt.num(r.ok) },
+          { key: 'failed', label: 'Failed', num: true, render: r => RevOps.fmt.num(r.failed) },
+          { key: 'rate', label: 'Success', num: true, render: r => {
+              const d = Number(r.ok) + Number(r.failed);
+              if (!d) return '—';
+              const v = 100 * r.ok / d;
+              const cls = v >= 95 ? 'green' : v >= 80 ? 'amber' : 'red';
+              return RevOps.badge(v.toFixed(0) + '%', cls);
+            } },
+          { key: 'avg_ms', label: 'Avg latency', num: true, render: r => RevOps.fmt.ms(r.avg_ms) },
+          { key: 'cost', label: 'Cost', num: true, render: r => RevOps.fmt.usd(r.cost) }
+        ], byTool);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    const dr = RevOps.DateRange('range', load);
+    RevOps.autoRefresh(() => load(dr.get()), 60000);
+  </script>
+</body>
+</html>

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Decisions · RevOps Agent Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">Decisions &amp; Approvals</h1>
+        <p class="page-sub">Agent recommendations, human outcomes, and approval SLA.</p>
+      </div>
+      <div id="range"></div>
+    </div>
+
+    <div id="err" class="banner"></div>
+    <div class="kpis" id="kpis" data-loads></div>
+
+    <div class="grid">
+      <div class="panel col-6" data-loads>
+        <h3>Recommendations</h3>
+        <p class="hint">Agent recommendation distribution.</p>
+        <div class="chart-wrap"><canvas id="c_rec"></canvas></div>
+      </div>
+      <div class="panel col-6" data-loads>
+        <h3>Approval outcomes</h3>
+        <p class="hint">Human-in-the-loop responses.</p>
+        <div class="chart-wrap"><canvas id="c_appr"></canvas></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Recent decisions</h3>
+        <p class="hint">Agent recommendation vs human decision.</p>
+        <div id="tbl_dec"></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Recent approvals</h3>
+        <p class="hint">HITL requests and response times.</p>
+        <div id="tbl_appr"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script>
+    RevOps.nav('decisions.html');
+    RevOps.applyChartDefaults();
+
+    async function load(range) {
+      const { fromISO, toISO } = range;
+      const p = [fromISO, toISO];
+      RevOps.setLoading(true);
+      try {
+        const [dec] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE human_decision IS NOT NULL) reviewed,
+                 count(*) FILTER (WHERE agreed_with_agent) agreed,
+                 round(avg(confidence_score)::numeric, 3) avg_conf
+          FROM decisions.records WHERE created_at >= $1 AND created_at < $2`, p);
+        const [appr] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE status='approved') approved,
+                 count(*) FILTER (WHERE status='rejected') rejected,
+                 count(*) FILTER (WHERE status='expired') expired,
+                 round(avg(EXTRACT(EPOCH FROM (responded_at - requested_at)))
+                       FILTER (WHERE responded_at IS NOT NULL)) avg_resp_s
+          FROM runs.approvals WHERE requested_at >= $1 AND requested_at < $2`, p);
+
+        const agreeRate = Number(dec.reviewed) ? (100 * dec.agreed / dec.reviewed) : null;
+        RevOps.kpis('kpis', [
+          { label: 'Decisions', value: RevOps.fmt.num(dec.total), sub: `${RevOps.fmt.num(dec.reviewed)} human-reviewed` },
+          { label: 'Agreement rate', value: agreeRate == null ? '—' : RevOps.fmt.pct(agreeRate),
+            tone: agreeRate == null ? '' : agreeRate >= 80 ? 'ok' : 'warn', sub: 'agent vs human' },
+          { label: 'Avg confidence', value: dec.avg_conf == null ? '—' : Number(dec.avg_conf).toFixed(2) },
+          { label: 'Approvals requested', value: RevOps.fmt.num(appr.total),
+            sub: `${RevOps.fmt.num(appr.approved)} ok · ${RevOps.fmt.num(appr.rejected)} rej · ${RevOps.fmt.num(appr.expired)} exp` },
+          { label: 'Avg approval time', value: appr.avg_resp_s == null ? '—' : RevOps.fmt.ms(Number(appr.avg_resp_s) * 1000) }
+        ]);
+
+        const byRec = await RevOps.sql('agent', `
+          SELECT COALESCE(recommendation,'(none)') recommendation, count(*) c
+          FROM decisions.records WHERE created_at >= $1 AND created_at < $2
+          GROUP BY 1 ORDER BY c DESC`, p);
+        RevOps.chart('c_rec', {
+          type: 'doughnut',
+          data: { labels: byRec.map(r => r.recommendation),
+            datasets: [{ data: byRec.map(r => Number(r.c)),
+              backgroundColor: byRec.map(r => RevOps.colorFor(r.recommendation)), borderWidth: 0 }] },
+          options: { cutout: '62%', plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const byAppr = await RevOps.sql('agent', `
+          SELECT status::text status, count(*) c FROM runs.approvals
+          WHERE requested_at >= $1 AND requested_at < $2 GROUP BY 1 ORDER BY c DESC`, p);
+        RevOps.chart('c_appr', {
+          type: 'doughnut',
+          data: { labels: byAppr.map(r => r.status),
+            datasets: [{ data: byAppr.map(r => Number(r.c)),
+              backgroundColor: byAppr.map(r => RevOps.statusColor(r.status)), borderWidth: 0 }] },
+          options: { cutout: '62%', plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const decs = await RevOps.sql('agent', `
+          SELECT created_at, agent_ref, decision_kind, recommendation, confidence_score,
+                 human_decision, agreed_with_agent
+          FROM decisions.records WHERE created_at >= $1 AND created_at < $2
+          ORDER BY created_at DESC LIMIT 100`, p);
+        RevOps.table('tbl_dec', [
+          { key: 'created_at', label: 'When', render: r => RevOps.fmt.dt(r.created_at) },
+          { key: 'agent_ref', label: 'Agent', render: r => `<span class="mono">${r.agent_ref}</span>` },
+          { key: 'decision_kind', label: 'Kind', render: r => r.decision_kind || '—' },
+          { key: 'recommendation', label: 'Agent rec', render: r => r.recommendation ? RevOps.badge(r.recommendation, 'blue') : '—' },
+          { key: 'confidence_score', label: 'Conf', num: true, render: r => r.confidence_score == null ? '—' : Number(r.confidence_score).toFixed(2) },
+          { key: 'human_decision', label: 'Human', render: r => r.human_decision ? RevOps.badge(r.human_decision, 'gray') : '—' },
+          { key: 'agreed_with_agent', label: 'Agreed', render: r => r.agreed_with_agent == null ? '—' : r.agreed_with_agent ? RevOps.badge('yes', 'green') : RevOps.badge('no', 'red') }
+        ], decs);
+
+        const apprs = await RevOps.sql('agent', `
+          SELECT requested_at, requested_by_agent_ref, status::text status, responded_by,
+                 EXTRACT(EPOCH FROM (responded_at - requested_at)) resp_s
+          FROM runs.approvals WHERE requested_at >= $1 AND requested_at < $2
+          ORDER BY requested_at DESC LIMIT 100`, p);
+        RevOps.table('tbl_appr', [
+          { key: 'requested_at', label: 'Requested', render: r => RevOps.fmt.dt(r.requested_at) },
+          { key: 'requested_by_agent_ref', label: 'Agent', render: r => `<span class="mono">${r.requested_by_agent_ref || '—'}</span>` },
+          { key: 'status', label: 'Status', render: r => RevOps.statusBadge(r.status) },
+          { key: 'responded_by', label: 'Responder', render: r => r.responded_by || '—' },
+          { key: 'resp_s', label: 'Response time', num: true, render: r => r.resp_s == null ? '—' : RevOps.fmt.ms(Number(r.resp_s) * 1000) }
+        ], apprs);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    const dr = RevOps.DateRange('range', load);
+    RevOps.autoRefresh(() => load(dr.get()), 60000);
+  </script>
+</body>
+</html>
