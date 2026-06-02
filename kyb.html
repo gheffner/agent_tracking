@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>KYB · RevOps Agent Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">KYB — Merchant Approval</h1>
+        <p class="page-sub">Business verification runs and the Stripe / enrichment evidence they gathered.</p>
+      </div>
+      <div id="range"></div>
+    </div>
+
+    <div id="err" class="banner"></div>
+    <div style="margin-bottom:16px"><span class="pii-note">🔒 Sensitive — contains merchant &amp; beneficial-owner data. Internal use only.</span></div>
+    <div class="kpis" id="kpis" data-loads></div>
+
+    <div class="grid">
+      <div class="panel col-8" data-loads>
+        <h3>Runs over time</h3>
+        <p class="hint">KYB runs (risk/kyb-merchant-approval + risk/merchant-approval), stacked by status.</p>
+        <div class="chart-wrap"><canvas id="c_time"></canvas></div>
+      </div>
+      <div class="panel col-4" data-loads>
+        <h3>Stripe call outcomes</h3>
+        <p class="hint">Reliability of the Stripe tool.</p>
+        <div class="chart-wrap"><canvas id="c_stripe"></canvas></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Merchant Stripe snapshot</h3>
+        <p class="hint">Latest <span class="mono">stripe.get_account</span> + beneficial owners per merchant in range.</p>
+        <div id="snapshot"></div>
+      </div>
+
+      <div class="panel col-12" data-loads>
+        <h3>Cases</h3>
+        <p class="hint">One row per run. Click a row to load the full Stripe + enrichment evidence below.</p>
+        <div id="tbl"></div>
+        <div id="detail"></div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script src="assets/risk.js"></script>
+  <script>
+    RevOps.nav('kyb.html');
+    RevOps.applyChartDefaults();
+    const AGENTS = "('risk/kyb-merchant-approval','risk/merchant-approval')";
+    let openRow = null;
+
+    async function load(range) {
+      const { fromISO, toISO, bucket } = range;
+      const p = [fromISO, toISO];
+      document.getElementById('detail').innerHTML = '';
+      openRow = null;
+      RevOps.setLoading(true);
+      try {
+        const [kpi] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE status='completed') completed,
+                 count(*) FILTER (WHERE status='failed') failed,
+                 round(sum(total_cost_usd),2) cost
+          FROM runs.agent_runs WHERE agent_ref IN ${AGENTS} AND started_at >= $1 AND started_at < $2`, p);
+        const [st] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE t.status='succeeded') ok,
+                 count(*) FILTER (WHERE t.status::text LIKE 'failed%') failed
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${AGENTS} AND t.tool_name LIKE 'stripe.%'
+            AND t.started_at >= $1 AND t.started_at < $2`, p);
+        const stripeRate = Number(st.total) ? (100 * st.ok / st.total) : null;
+        RevOps.kpis('kpis', [
+          { label: 'KYB runs', value: RevOps.fmt.num(kpi.total),
+            sub: `${RevOps.fmt.num(kpi.completed)} completed · ${RevOps.fmt.num(kpi.failed)} failed` },
+          { label: 'Total cost', value: RevOps.fmt.usd(kpi.cost) },
+          { label: 'Stripe calls', value: RevOps.fmt.num(st.total) },
+          { label: 'Stripe success', value: stripeRate == null ? '—' : RevOps.fmt.pct(stripeRate),
+            tone: stripeRate == null ? '' : stripeRate >= 90 ? 'ok' : stripeRate >= 60 ? 'warn' : 'bad',
+            sub: `${RevOps.fmt.num(st.failed)} failed` }
+        ]);
+
+        // runs over time
+        const ts = await RevOps.sql('agent', `
+          SELECT date_trunc($3, started_at) bucket, status::text status, count(*) c
+          FROM runs.agent_runs WHERE agent_ref IN ${AGENTS} AND started_at >= $1 AND started_at < $2
+          GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
+        const pv = RevOps.pivot(ts, 'status', 'c');
+        RevOps.chart('c_time', {
+          type: 'bar',
+          data: { labels: pv.labels.map(l => RevOps.bucketLabel(l, bucket)),
+            datasets: pv.order.map(s => ({ label: s, data: pv.datasetFor(s),
+              backgroundColor: RevOps.statusColor(s), borderRadius: 3 })) },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }), y: RevOps.axes.yStacked() },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        // stripe outcomes by tool
+        const sx = await RevOps.sql('agent', `
+          SELECT t.tool_name, t.status::text status, count(*) c
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${AGENTS} AND t.tool_name LIKE 'stripe.%'
+            AND t.started_at >= $1 AND t.started_at < $2
+          GROUP BY 1,2 ORDER BY c DESC`, p);
+        RevOps.chart('c_stripe', {
+          type: 'doughnut',
+          data: { labels: sx.map(r => r.tool_name + ' · ' + r.status),
+            datasets: [{ data: sx.map(r => Number(r.c)),
+              backgroundColor: sx.map(r => r.status === 'succeeded' ? RevOps.colorFor(r.tool_name) : '#f87171'),
+              borderWidth: 0 }] },
+          options: { cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 10 } } } } }
+        });
+
+        // merchant snapshot: latest get_account + persons per merchant
+        const snap = await RevOps.sql('agent', `
+          SELECT DISTINCT ON (r.subject_id) r.subject_id, t.result, t.started_at
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${AGENTS} AND t.tool_name='stripe.get_account' AND t.status='succeeded'
+            AND t.started_at >= $1 AND t.started_at < $2
+          ORDER BY r.subject_id, t.started_at DESC`, p);
+        const persons = await RevOps.sql('agent', `
+          SELECT DISTINCT ON (r.subject_id) r.subject_id, t.result, t.started_at
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${AGENTS} AND t.tool_name='stripe.list_account_persons' AND t.status='succeeded'
+            AND t.started_at >= $1 AND t.started_at < $2
+          ORDER BY r.subject_id, t.started_at DESC`, p);
+        const personsBy = Object.fromEntries(persons.map(r => [r.subject_id, r.result]));
+        const snapEl = document.getElementById('snapshot');
+        if (!snap.length) snapEl.innerHTML = '<div class="empty">No successful Stripe account lookups in range.</div>';
+        else snapEl.innerHTML = snap.map(r =>
+          RevOps.renderToolCall({ tool_name: 'stripe.get_account', status: 'succeeded', result: r.result, started_at: r.started_at, tool_args: { account_id: 'merchant ' + r.subject_id } }) +
+          (personsBy[r.subject_id] ? RevOps.renderToolCall({ tool_name: 'stripe.list_account_persons', status: 'succeeded', result: personsBy[r.subject_id], started_at: r.started_at, tool_args: {} }) : '')
+        ).join('');
+
+        // cases table
+        const cases = await RevOps.sql('agent', `
+          SELECT r.run_id, r.agent_ref, r.subject_id, r.status::text status, r.started_at, r.total_cost_usd,
+                 r.final_output->>'merchant_name' merchant_name,
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name LIKE 'stripe.%') stripe_calls,
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name IN
+                    ('sanctions.check','peps.check','sos.entity_search','sos.officer_search','sec.search','domain.whois','domain.wayback','web.search','web.fetch')) enrich_calls
+          FROM runs.agent_runs r
+          WHERE r.agent_ref IN ${AGENTS} AND r.started_at >= $1 AND r.started_at < $2
+          ORDER BY r.started_at DESC LIMIT 200`, p);
+        renderCases(cases);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    function renderCases(rows) {
+      const el = document.getElementById('tbl');
+      if (!rows.length) { el.innerHTML = '<div class="empty">No KYB runs in this range.</div>'; return; }
+      const head = ['Started', 'Agent', 'Merchant', 'Status', 'Stripe', 'Screening', 'Cost'].map(h => `<th>${h}</th>`).join('');
+      const body = rows.map(r => `
+        <tr class="clickable" data-run="${RevOps.esc(r.run_id)}">
+          <td>${RevOps.fmt.dt(r.started_at)}</td>
+          <td><span class="mono">${RevOps.esc(r.agent_ref.replace('risk/', ''))}</span></td>
+          <td>${RevOps.esc(r.merchant_name || r.subject_id)}</td>
+          <td>${RevOps.statusBadge(r.status)}</td>
+          <td class="num">${RevOps.fmt.num(r.stripe_calls)}</td>
+          <td class="num">${RevOps.fmt.num(r.enrich_calls)}</td>
+          <td class="num">${RevOps.fmt.usd4(r.total_cost_usd)}</td>
+        </tr>`).join('');
+      el.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+      el.querySelectorAll('tr.clickable').forEach(tr => tr.addEventListener('click', () => {
+        const runId = tr.dataset.run;
+        const detail = document.getElementById('detail');
+        if (openRow === runId) { detail.innerHTML = ''; tr.classList.remove('open'); openRow = null; return; }
+        el.querySelectorAll('tr.open').forEach(x => x.classList.remove('open'));
+        tr.classList.add('open'); openRow = runId;
+        RevOps.loadCaseDetail(runId, detail);
+      }));
+    }
+
+    const dr = RevOps.DateRange('range', load);
+    RevOps.autoRefresh(() => { if (!openRow) load(dr.get()); }, 60000);
+  </script>
+</body>
+</html>

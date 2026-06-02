@@ -20,6 +20,8 @@ COPY index.html \
      tool_calls.html \
      webhooks.html \
      decisions.html \
+     kyb.html \
+     kyc.html \
      /usr/share/nginx/html/
 
 # Shared assets (styles + runtime)

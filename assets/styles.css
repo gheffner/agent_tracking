@@ -285,3 +285,82 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   color: var(--muted);
   margin: 30px 0 14px;
 }
+
+/* ---------- Risk pages (KYB/KYC): evidence & case detail ---------- */
+.pii-note {
+  display: inline-flex; align-items: center; gap: 7px;
+  background: rgba(251,191,36,.1); color: var(--warn);
+  border: 1px solid rgba(251,191,36,.25);
+  padding: 6px 12px; border-radius: var(--radius-sm);
+  font-size: 12px; font-weight: 600;
+}
+tr.clickable { cursor: pointer; }
+tr.clickable td:first-child { border-left: 2px solid transparent; }
+tr.clickable.open td:first-child { border-left-color: var(--primary); }
+
+/* the lazy-loaded detail drawer that expands under a clicked case row */
+#detail { margin-top: 14px; }
+#detail:empty { display: none; }
+.evidence {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 16px 18px;
+  margin-bottom: 12px;
+}
+.evidence > .ev-head {
+  display: flex; align-items: center; gap: 10px;
+  font-family: var(--font-display); font-weight: 700; font-size: 13px;
+  margin-bottom: 12px;
+}
+.evidence > .ev-head .mono { color: var(--accent); font-weight: 600; font-size: 12px; }
+.evidence > .ev-head .when { margin-left: auto; color: var(--muted); font-size: 11.5px; font-weight: 500; }
+
+.kv { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px,1fr)); gap: 8px 22px; }
+.kv .row { display: flex; justify-content: space-between; gap: 12px; padding: 4px 0; border-bottom: 1px solid var(--surface-3); font-size: 12.5px; }
+.kv .row .k { color: var(--muted); }
+.kv .row .v { color: var(--text); font-weight: 600; text-align: right; word-break: break-word; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+
+.casefile {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 18px;
+  font-size: 13px;
+  line-height: 1.6;
+  max-height: 520px;
+  overflow: auto;
+}
+.casefile h2 { font-family: var(--font-display); font-size: 16px; margin: 14px 0 6px; color: var(--text); }
+.casefile h3 { font-family: var(--font-display); font-size: 14px; margin: 14px 0 5px; color: var(--primary-2); }
+.casefile h4 { font-size: 13px; margin: 10px 0 4px; color: var(--text-2); }
+.casefile hr { border: 0; border-top: 1px solid var(--border); margin: 12px 0; }
+.casefile ul { margin: 6px 0; padding-left: 20px; color: var(--text-2); }
+.casefile p { margin: 6px 0; color: var(--text-2); }
+.casefile strong { color: var(--text); }
+.casefile table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+.casefile th, .casefile td { border: 1px solid var(--border); padding: 5px 10px; text-align: left; }
+.casefile th { color: var(--muted); }
+.slack-summary {
+  white-space: pre-wrap;
+  background: var(--bg);
+  border-left: 3px solid var(--primary);
+  border-radius: 6px;
+  padding: 12px 14px;
+  font-size: 12.5px;
+  color: var(--text-2);
+  line-height: 1.5;
+}
+pre.json {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-size: 11.5px;
+  color: var(--text-2);
+  overflow: auto;
+  max-height: 360px;
+  margin: 0;
+}

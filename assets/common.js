@@ -72,6 +72,13 @@
   };
   RevOps.fmt = fmt;
 
+  /* Escape untrusted strings before inserting into innerHTML. */
+  RevOps.esc = function (s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  };
+
   /* ----------------------------- Color palette ----------------------------- */
   const PALETTE = ['#6366f1', '#22d3ee', '#34d399', '#fbbf24', '#f87171', '#a78bfa', '#f472b6', '#60a5fa', '#2dd4bf', '#fb923c'];
   RevOps.PALETTE = PALETTE;
@@ -181,7 +188,9 @@
     { href: 'llm_usage.html', label: 'LLM Usage' },
     { href: 'tool_calls.html', label: 'Tool Calls' },
     { href: 'webhooks.html', label: 'Webhooks' },
-    { href: 'decisions.html', label: 'Decisions' }
+    { href: 'decisions.html', label: 'Decisions' },
+    { href: 'kyb.html', label: 'KYB' },
+    { href: 'kyc.html', label: 'KYC' }
   ];
   RevOps.nav = function (active) {
     const links = PAGES.map(p =>
