@@ -3,9 +3,13 @@ FROM nginx:1.27-alpine
 # Only substitute our SQL_* env vars at startup, leave nginx's $variables alone.
 ENV NGINX_ENVSUBST_FILTER=^SQL_
 
-# Empty defaults so the container still starts if the deployer forgot to set the
-# env vars — /api/sql will just fail at AWS with a clear 401/403 instead of
-# nginx crash-looping on an unknown variable. Override these at deploy time.
+# Harmless defaults so the container still starts if the deployer forgot to set
+# the env vars — SQL calls will just fail clearly (502 / 401) instead of nginx
+# crash-looping. Override ALL THREE at deploy time. SQL_API_BASE must be the
+# SQL proxy API Gateway base URL (the part before /db/...), e.g.
+#   https://XXXXXXXX.execute-api.us-east-1.amazonaws.com/prod
+# It is intentionally NOT baked in here, so no internal URL lives in the repo.
+ENV SQL_API_BASE="https://127.0.0.1"
 ENV SQL_IDENTITY=""
 ENV SQL_SECRET=""
 

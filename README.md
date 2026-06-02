@@ -41,12 +41,13 @@ vars in deploybay before deploying:
 
 | Env var | Value |
 |---|---|
-| `SQL_IDENTITY` | `gheffner` |
+| `SQL_API_BASE` | SQL proxy API Gateway base URL — the part before `/db/…`, e.g. `https://XXXXXXXX.execute-api.us-east-1.amazonaws.com/prod` |
+| `SQL_IDENTITY` | your proxy identity |
 | `SQL_SECRET` | the `X-Internal-Secret` for the SQL proxy |
 
 deploybay substitutes them into the nginx config at container startup. No secrets
-live in the repo or any built image layer. (Confirm injection at `/debug-env.json`
-— it reports only the *length* of each var, never the value.)
+*or internal URLs* live in the repo or any built image layer. (Confirm injection
+at `/debug-env.json` — it reports only the *length* of each var, never the value.)
 
 ## Local development
 
@@ -54,7 +55,8 @@ live in the repo or any built image layer. (Confirm injection at `/debug-env.jso
 ```sh
 docker build -t revops-hub .
 docker run --rm -p 8080:80 \
-  -e SQL_IDENTITY=gheffner \
+  -e SQL_API_BASE=https://XXXXXXXX.execute-api.us-east-1.amazonaws.com/prod \
+  -e SQL_IDENTITY=your-identity \
   -e SQL_SECRET=your-secret-here \
   revops-hub
 # open http://localhost:8080

@@ -12,15 +12,21 @@ server {
 
   # --- SQL proxies -----------------------------------------------------------
   # The browser POSTs {sql, params} to these same-origin paths. nginx forwards
-  # to the internal AWS API Gateway and injects the identity + secret headers,
-  # so the credential never reaches the client.
+  # to the internal SQL proxy API Gateway and injects the identity + secret
+  # headers, so the credential never reaches the client.
+  #
+  # SQL_API_BASE, SQL_IDENTITY and SQL_SECRET are substituted from the
+  # container's runtime env vars by the official nginx image's entrypoint
+  # (text substitution at startup), so no internal URL or credential lives in
+  # this repo. SQL_API_BASE is the API Gateway base, e.g.
+  #   https://XXXXXXXX.execute-api.<region>.amazonaws.com/prod
+  # The Host header is derived automatically from SQL_API_BASE ($proxy_host).
 
   # agent_platform DB: runs, decisions, core, observations…
   location = /api/sql {
     if ($request_method != POST) { return 405; }
     proxy_method POST;
-    proxy_pass https://1r7hjb5jv6.execute-api.us-east-1.amazonaws.com/prod/db/agent_platform/sql;
-    proxy_set_header Host              1r7hjb5jv6.execute-api.us-east-1.amazonaws.com;
+    proxy_pass ${SQL_API_BASE}/db/agent_platform/sql;
     proxy_set_header X-Identity        "${SQL_IDENTITY}";
     proxy_set_header X-Internal-Secret "${SQL_SECRET}";
     proxy_set_header Content-Type      "application/json";
@@ -31,8 +37,7 @@ server {
   location = /api/webhooks/sql {
     if ($request_method != POST) { return 405; }
     proxy_method POST;
-    proxy_pass https://1r7hjb5jv6.execute-api.us-east-1.amazonaws.com/prod/db/webhooks/sql;
-    proxy_set_header Host              1r7hjb5jv6.execute-api.us-east-1.amazonaws.com;
+    proxy_pass ${SQL_API_BASE}/db/webhooks/sql;
     proxy_set_header X-Identity        "${SQL_IDENTITY}";
     proxy_set_header X-Internal-Secret "${SQL_SECRET}";
     proxy_set_header Content-Type      "application/json";
