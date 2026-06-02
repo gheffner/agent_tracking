@@ -15,6 +15,7 @@ ENV SQL_SECRET=""
 
 # Static dashboards
 COPY index.html \
+     agents.html \
      agent_runs.html \
      llm_usage.html \
      tool_calls.html \

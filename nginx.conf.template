@@ -5,8 +5,11 @@ server {
   root /usr/share/nginx/html;
   index index.html;
 
-  # Static dashboards + assets
+  # Static dashboards + assets. no-cache = browsers must revalidate with the
+  # server on each load (conditional GET → 304 if unchanged), so a deploy never
+  # leaves a stale common.js / risk.js / styles.css in a client cache.
   location / {
+    add_header Cache-Control "no-cache";
     try_files $uri $uri/ =404;
   }
 

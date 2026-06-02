@@ -184,6 +184,7 @@
   /* ----------------------------- Navigation ----------------------------- */
   const PAGES = [
     { href: 'index.html', label: 'Overview' },
+    { href: 'agents.html', label: 'Agents' },
     { href: 'agent_runs.html', label: 'Agent Runs' },
     { href: 'llm_usage.html', label: 'LLM Usage' },
     { href: 'tool_calls.html', label: 'Tool Calls' },

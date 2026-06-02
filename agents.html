@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Agents · RevOps Agent Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">Agents Command Room</h1>
+        <p class="page-sub">Toggle agents on/off and inspect each run's prompts, responses, tools, and timeline.</p>
+      </div>
+      <div id="nav-status-spacer"></div>
+    </div>
+
+    <div id="err" class="banner"></div>
+    <div class="breadcrumb" id="crumb"></div>
+
+    <!-- 1. Registry -->
+    <div class="panel" id="registry-panel" data-loads>
+      <h3>Agent registry</h3>
+      <p class="hint">Flip the switch to activate / deactivate (turning on activates the latest version). Click a row to view its runs.</p>
+      <div id="registry"></div>
+    </div>
+
+    <!-- 2. Selected agent runs -->
+    <div class="panel" id="runs-panel" style="display:none; margin-top:14px" data-loads>
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:16px; flex-wrap:wrap">
+        <div><h3 id="runs-title">Runs</h3><p class="hint">Click a run to open the inspector.</p></div>
+        <div id="range"></div>
+      </div>
+      <div class="kpis" id="runs-kpis" style="margin:8px 0 14px"></div>
+      <div id="runs"></div>
+    </div>
+
+    <!-- 3. Run inspector -->
+    <div class="panel" id="inspector-panel" style="display:none; margin-top:14px" data-loads>
+      <h3 id="insp-title">Run inspector</h3>
+      <div id="insp-meta" class="kpis" style="margin:8px 0 16px"></div>
+      <div class="tabs" id="insp-tabs">
+        <button data-tab="transcript" class="active">Transcript</button>
+        <button data-tab="tools">Tool calls</button>
+        <button data-tab="timeline">Timeline</button>
+      </div>
+      <div class="tabpane active" id="pane-transcript"></div>
+      <div class="tabpane" id="pane-tools"></div>
+      <div class="tabpane" id="pane-timeline"></div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script src="assets/risk.js"></script>
+  <script src="assets/agents.js"></script>
+  <script>
+    RevOps.nav('agents.html');
+
+    let registry = [];          // aggregated per agent_ref
+    let selectedAgent = null;   // agent_ref
+    let selectedRun = null;     // run row
+
+    /* ---------------- breadcrumb ---------------- */
+    function renderCrumb() {
+      const c = document.getElementById('crumb');
+      let html = `<button data-nav="all">All agents</button>`;
+      if (selectedAgent) html += `<span class="sep">›</span>` +
+        (selectedRun ? `<button data-nav="agent">${RevOps.esc(selectedAgent)}</button>` : `<span class="cur">${RevOps.esc(selectedAgent)}</span>`);
+      if (selectedRun) html += `<span class="sep">›</span><span class="cur">run ${RevOps.esc(String(selectedRun.run_id).slice(0, 8))}</span>`;
+      c.innerHTML = html;
+      c.querySelectorAll('[data-nav]').forEach(b => b.addEventListener('click', () => {
+        if (b.dataset.nav === 'all') { selectedAgent = null; selectedRun = null; showPanels(); }
+        else if (b.dataset.nav === 'agent') { selectedRun = null; showPanels(); }
+        renderCrumb();
+      }));
+    }
+    function showPanels() {
+      document.getElementById('runs-panel').style.display = selectedAgent ? 'block' : 'none';
+      document.getElementById('inspector-panel').style.display = selectedRun ? 'block' : 'none';
+    }
+
+    /* ---------------- 1. registry ---------------- */
+    async function loadRegistry() {
+      RevOps.setLoading(true);
+      try {
+        const agents = await RevOps.sql('agent', `
+          SELECT agent_ref, version, display_name, owner, risk_class, model, is_active
+          FROM core.agents ORDER BY agent_ref, version`);
+        const counts = await RevOps.sql('agent', `
+          SELECT agent_ref, count(*) runs, max(started_at) last_run
+          FROM runs.agent_runs GROUP BY agent_ref`);
+        const countBy = Object.fromEntries(counts.map(r => [r.agent_ref, r]));
+
+        const byRef = {};
+        for (const a of agents) {
+          const g = byRef[a.agent_ref] || (byRef[a.agent_ref] = { agent_ref: a.agent_ref, versions: [], active: null, rows: [] });
+          g.versions.push(a.version); g.rows.push(a);
+          if (a.is_active) g.active = a;
+        }
+        registry = Object.values(byRef).map(g => {
+          const latest = RevOps.latestVersion(g.versions);
+          const attr = g.active || g.rows.find(r => r.version === latest) || g.rows[0];
+          const c = countBy[g.agent_ref] || {};
+          return {
+            agent_ref: g.agent_ref, display_name: attr.display_name, owner: attr.owner,
+            risk_class: attr.risk_class, model: attr.model, latest,
+            active_version: g.active ? g.active.version : null, is_on: !!g.active,
+            n_versions: g.versions.length, runs: Number(c.runs || 0), last_run: c.last_run || null
+          };
+        }).sort((a, b) => a.agent_ref.localeCompare(b.agent_ref));
+
+        renderRegistry();
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load registry: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    function riskBadge(rc) {
+      const cls = { critical: 'red', high: 'amber', medium: 'blue', low: 'gray' }[rc] || 'gray';
+      return RevOps.badge(rc || '—', cls);
+    }
+
+    function renderRegistry() {
+      const el = document.getElementById('registry');
+      const head = ['', 'Agent', 'Active ver.', 'Risk', 'Owner', 'Model', 'Runs', 'Last run'].map(h => `<th>${h}</th>`).join('');
+      const body = registry.map(a => `
+        <tr class="agent-row ${a.agent_ref === selectedAgent ? 'sel' : ''}" data-ref="${RevOps.esc(a.agent_ref)}">
+          <td class="switch-cell">
+            <label class="switch">
+              <input type="checkbox" ${a.is_on ? 'checked' : ''}
+                data-ref="${RevOps.esc(a.agent_ref)}" data-latest="${RevOps.esc(a.latest)}"
+                data-on="${a.is_on}" data-risk="${RevOps.esc(a.risk_class)}" data-name="${RevOps.esc(a.display_name)}">
+              <span class="slider"></span>
+            </label>
+          </td>
+          <td><div style="font-weight:600;color:var(--text)">${RevOps.esc(a.display_name || a.agent_ref)}</div>
+              <div class="mono" style="font-size:11px;color:var(--muted)">${RevOps.esc(a.agent_ref)}</div></td>
+          <td>${a.active_version ? `<span class="mono">${RevOps.esc(a.active_version)}</span>` : RevOps.badge('off', 'gray')}
+              ${a.active_version && RevOps.semverCmp(a.active_version, a.latest) < 0 ? `<div style="font-size:10.5px;color:var(--warn)">latest ${RevOps.esc(a.latest)}</div>` : ''}</td>
+          <td>${riskBadge(a.risk_class)}</td>
+          <td>${RevOps.esc(a.owner) || '—'}</td>
+          <td><span class="mono" style="font-size:11.5px">${RevOps.esc(a.model) || '—'}</span></td>
+          <td class="num">${RevOps.fmt.num(a.runs)}</td>
+          <td>${a.last_run ? RevOps.fmt.rel(a.last_run) : '—'}</td>
+        </tr>`).join('');
+      el.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+
+      el.querySelectorAll('input[type=checkbox]').forEach(cb =>
+        cb.addEventListener('click', onToggle));
+      el.querySelectorAll('tr.agent-row').forEach(tr => tr.addEventListener('click', e => {
+        if (e.target.closest('.switch-cell')) return; // ignore toggle clicks
+        selectAgent(tr.dataset.ref);
+      }));
+    }
+
+    async function onToggle(e) {
+      e.preventDefault(); // don't flip until confirmed
+      const cb = e.currentTarget;
+      const ref = cb.dataset.ref, latest = cb.dataset.latest;
+      const currentlyOn = cb.dataset.on === 'true';
+      const turnOn = !currentlyOn;
+      const critical = cb.dataset.risk === 'critical';
+      const name = cb.dataset.name || ref;
+
+      const ok = await RevOps.confirmModal({
+        title: `${turnOn ? 'Activate' : 'Deactivate'} agent?`,
+        message: `Turn <b>${RevOps.esc(name)}</b> <b>${turnOn ? 'ON' : 'OFF'}</b>` +
+          (turnOn ? ` (activates version <b>${RevOps.esc(latest)}</b>)` : '') + '.' +
+          (critical ? `<br><br>⚠ This is a <b>critical-risk</b> agent.` : ''),
+        confirmLabel: turnOn ? 'Activate' : 'Deactivate',
+        danger: !turnOn || critical
+      });
+      if (!ok) return;
+
+      const sw = cb.closest('.switch');
+      sw.classList.add('busy');
+      try {
+        const rows = await RevOps.setAgentActive(ref, turnOn, latest);
+        const nowOn = turnOn ? (rows.length > 0 && rows[0].is_active) : false;
+        RevOps.banner('err', `${RevOps.esc(name)} is now ${nowOn ? 'ACTIVE' : 'OFF'}.`, 'info');
+        await loadRegistry();
+      } catch (err) {
+        RevOps.banner('err', `Toggle failed: ${err.message}`);
+        sw.classList.remove('busy');
+      }
+    }
+
+    /* ---------------- 2. agent runs ---------------- */
+    function selectAgent(ref) {
+      selectedAgent = ref; selectedRun = null;
+      document.getElementById('runs-title').textContent = 'Runs · ' + ref;
+      renderRegistry(); renderCrumb(); showPanels();
+      document.getElementById('runs-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      loadRuns();
+    }
+
+    async function loadRuns() {
+      if (!selectedAgent) return;
+      const { fromISO, toISO } = dr.get();
+      RevOps.setLoading(true);
+      try {
+        const runs = await RevOps.sql('agent', `
+          SELECT run_id, agent_version, status::text status, subject_id, subject_kind,
+                 started_at, ended_at, duration_ms, total_cost_usd,
+                 total_tokens_in, total_tokens_out, step_count, ended_reason
+          FROM runs.agent_runs WHERE agent_ref = $1 AND started_at >= $2 AND started_at < $3
+          ORDER BY started_at DESC LIMIT 200`, [selectedAgent, fromISO, toISO]);
+
+        const total = runs.length;
+        const completed = runs.filter(r => r.status === 'completed').length;
+        const failed = runs.filter(r => r.status === 'failed').length;
+        const cost = runs.reduce((s, r) => s + Number(r.total_cost_usd || 0), 0);
+        const terminal = completed + failed;
+        RevOps.kpis('runs-kpis', [
+          { label: 'Runs (in range)', value: RevOps.fmt.num(total) },
+          { label: 'Success rate', value: terminal ? RevOps.fmt.pct(100 * completed / terminal) : '—',
+            tone: terminal ? (completed / terminal >= 0.9 ? 'ok' : completed / terminal >= 0.7 ? 'warn' : 'bad') : '',
+            sub: `${completed} ok · ${failed} failed` },
+          { label: 'Cost', value: RevOps.fmt.usd(cost) }
+        ]);
+
+        const el = document.getElementById('runs');
+        if (!runs.length) { el.innerHTML = '<div class="empty">No runs in this range.</div>'; return; }
+        const head = ['Started', 'Ver.', 'Status', 'Subject', 'Duration', 'Steps', 'Tokens', 'Cost', 'Ended'].map(h => `<th>${h}</th>`).join('');
+        const rows = runs.map(r => `
+          <tr class="clickable" data-run='${RevOps.esc(JSON.stringify({ run_id: r.run_id }))}'>
+            <td>${RevOps.fmt.dt(r.started_at)}</td>
+            <td><span class="mono">${RevOps.esc(r.agent_version)}</span></td>
+            <td>${RevOps.statusBadge(r.status)}</td>
+            <td><span class="mono" style="font-size:11px">${RevOps.esc(r.subject_id || '—')}</span></td>
+            <td class="num">${RevOps.fmt.ms(r.duration_ms)}</td>
+            <td class="num">${RevOps.fmt.num(r.step_count)}</td>
+            <td class="num">${RevOps.fmt.compact(Number(r.total_tokens_in || 0) + Number(r.total_tokens_out || 0))}</td>
+            <td class="num">${RevOps.fmt.usd4(r.total_cost_usd)}</td>
+            <td>${RevOps.esc(r.ended_reason) || '—'}</td>
+          </tr>`).join('');
+        el.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${rows}</tbody></table></div>`;
+        // stash full rows for the inspector
+        const map = Object.fromEntries(runs.map(r => [r.run_id, r]));
+        el.querySelectorAll('tr.clickable').forEach(tr => tr.addEventListener('click', () => {
+          const id = JSON.parse(tr.dataset.run).run_id;
+          selectRun(map[id]);
+        }));
+        RevOps.banner('err', null);
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load runs: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    /* ---------------- 3. run inspector ---------------- */
+    function selectRun(run) {
+      selectedRun = run;
+      renderCrumb(); showPanels();
+      document.getElementById('insp-title').textContent = `Run ${String(run.run_id).slice(0, 8)} · ${selectedAgent}@${run.agent_version}`;
+      RevOps.kpis('insp-meta', [
+        { label: 'Status', value: RevOps.statusBadge(run.status) },
+        { label: 'Duration', value: RevOps.fmt.ms(run.duration_ms) },
+        { label: 'Steps', value: RevOps.fmt.num(run.step_count) },
+        { label: 'Tokens', value: RevOps.fmt.compact(Number(run.total_tokens_in || 0) + Number(run.total_tokens_out || 0)) },
+        { label: 'Cost', value: RevOps.fmt.usd4(run.total_cost_usd) },
+        { label: 'Started', value: RevOps.fmt.dt(run.started_at) }
+      ]);
+      setTab('transcript');
+      document.getElementById('inspector-panel').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      loadInspector(run.run_id);
+    }
+
+    async function loadInspector(runId) {
+      const tp = document.getElementById('pane-transcript');
+      const to = document.getElementById('pane-tools');
+      const tl = document.getElementById('pane-timeline');
+      tp.innerHTML = to.innerHTML = tl.innerHTML = '<div class="empty">Loading…</div>';
+      try {
+        const [calls, tools, events] = await Promise.all([
+          RevOps.sql('agent', `SELECT iteration, model_id, stop_reason, messages, response,
+                 tokens_input, tokens_output, latency_ms, cost_usd, started_at
+            FROM runs.llm_calls WHERE run_id = $1 ORDER BY iteration, started_at`, [runId]),
+          RevOps.sql('agent', `SELECT tool_name, status::text status, tool_args, result, started_at, duration_ms
+            FROM runs.tool_calls WHERE run_id = $1 ORDER BY started_at`, [runId]),
+          RevOps.sql('agent', `SELECT sequence_no, ts, event_type, payload
+            FROM runs.run_events WHERE run_id = $1 ORDER BY sequence_no LIMIT 500`, [runId])
+        ]);
+        // guard against a stale selection (user navigated away)
+        if (!selectedRun || selectedRun.run_id !== runId) return;
+        tp.innerHTML = RevOps.renderTranscript(calls) + RevOps.renderCallTable(calls);
+        to.innerHTML = tools.length ? tools.map(RevOps.renderToolCall).join('') : '<div class="empty">No tool calls for this run.</div>';
+        tl.innerHTML = RevOps.renderTimeline(events);
+      } catch (e) {
+        tp.innerHTML = `<div class="banner show err" style="display:block">Failed to load inspector: ${RevOps.esc(e.message)}</div>`;
+        to.innerHTML = tl.innerHTML = '';
+      }
+    }
+
+    function setTab(name) {
+      document.querySelectorAll('#insp-tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+      ['transcript', 'tools', 'timeline'].forEach(t =>
+        document.getElementById('pane-' + t).classList.toggle('active', t === name));
+    }
+    document.querySelectorAll('#insp-tabs button').forEach(b => b.addEventListener('click', () => setTab(b.dataset.tab)));
+
+    /* ---------------- init ---------------- */
+    const dr = RevOps.DateRange('range', () => { if (selectedAgent) loadRuns(); });
+    renderCrumb();
+    loadRegistry();
+  </script>
+</body>
+</html>

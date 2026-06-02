@@ -4,7 +4,13 @@
  */
 (function () {
   const R = window.RevOps;
-  const esc = R.esc;
+  // Self-contained so risk.js works even against a stale/cached common.js.
+  const esc = R.esc || function (s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, c =>
+      ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  };
+  if (!R.esc) R.esc = esc; // backfill for page-level RevOps.esc() calls too
 
   /* ---- recommendation / risk badges ---- */
   R.recBadge = function (rec) {
