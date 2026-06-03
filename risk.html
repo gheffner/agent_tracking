@@ -573,11 +573,11 @@
     const LOADERS = { supervisor: loadSupervisor, kyb: loadKyb, kyc: loadKyc };
     const loadedFor = { supervisor: null, kyb: null, kyc: null }; // range key last loaded per tab
 
-    function loadActive(force) {
-      const r = dr.get();
-      if (!force && loadedFor[activeTab] === r.key + r.fromISO) return;
-      loadedFor[activeTab] = r.key + r.fromISO;
-      LOADERS[activeTab](r);
+    function loadActive(range, force) {
+      const k = range.key + range.fromISO;
+      if (!force && loadedFor[activeTab] === k) return;
+      loadedFor[activeTab] = k;
+      LOADERS[activeTab](range);
     }
 
     function showTab(name) {
@@ -585,13 +585,16 @@
       document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
       ['supervisor', 'kyb', 'kyc'].forEach(t =>
         document.getElementById('pane-' + t).classList.toggle('active', t === name));
-      loadActive(false);
+      loadActive(dr.get(), false);
     }
     document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
 
-    // DateRange fires onChange immediately on creation (default 7d) → loads the supervisor tab.
-    const dr = RevOps.DateRange('range', () => { loadedFor[activeTab] = null; loadActive(true); });
-    RevOps.autoRefresh(() => { if (!open[activeTab]) loadActive(true); }, 60000);
+    // DateRange fires onChange synchronously during construction (default 7d), which
+    // loads the initial (supervisor) tab. The callback receives the range state directly
+    // so we never read `dr` before its `const` binding is assigned (avoids a TDZ error
+    // that would otherwise halt all data loading on this page).
+    const dr = RevOps.DateRange('range', (range) => { loadedFor[activeTab] = null; loadActive(range, true); });
+    RevOps.autoRefresh(() => { if (!open[activeTab]) loadActive(dr.get(), true); }, 60000);
   </script>
 </body>
 </html>
