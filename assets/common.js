@@ -190,8 +190,7 @@
     { href: 'tool_calls.html', label: 'Tool Calls' },
     { href: 'webhooks.html', label: 'Webhooks' },
     { href: 'decisions.html', label: 'Decisions' },
-    { href: 'kyb.html', label: 'KYB' },
-    { href: 'kyc.html', label: 'KYC' }
+    { href: 'risk.html', label: 'Merchant Risk' }
   ];
   RevOps.nav = function (active) {
     const links = PAGES.map(p =>

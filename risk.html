@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Merchant Verification · RevOps Agent Platform</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/styles.css">
+</head>
+<body>
+  <div class="page">
+    <div class="page-head">
+      <div>
+        <h1 class="page-title">Merchant Verification — Risk</h1>
+        <p class="page-sub">The Risk Specialist supervisor and the KYB / KYC sub-agents it orchestrates.</p>
+      </div>
+      <div id="range"></div>
+    </div>
+
+    <div id="err" class="banner"></div>
+    <div style="margin-bottom:14px"><span class="pii-note">🔒 Sensitive — merchant, beneficial-owner &amp; personal screening data. Internal use only.</span></div>
+
+    <div class="tabs" id="tabs">
+      <button data-tab="supervisor" class="active">Risk Specialist</button>
+      <button data-tab="kyb">KYB</button>
+      <button data-tab="kyc">KYC</button>
+    </div>
+
+    <!-- ===================== SUPERVISOR ===================== -->
+    <div class="tabpane active" id="pane-supervisor">
+      <p class="hint" style="margin:-4px 0 14px">
+        <span class="mono">risk/risk-specialist</span> — fires on a Salesforce <span class="mono">Merchant_Account__c</span>
+        stage change to “Pending Risk Review”, invokes KYB + KYC, then records the approve / decline decision.
+        Toggle it on/off in the <a href="agents.html">Agents Command Room</a>; halt it via the
+        <span class="mono">agent:risk/risk-specialist</span> / <span class="mono">risk:supervisor_halt</span> kill switches.
+      </p>
+      <div class="kpis" id="sup_kpis" data-loads></div>
+      <div class="grid">
+        <div class="panel col-8" data-loads>
+          <h3>Supervisor runs over time</h3>
+          <p class="hint">Stacked by status.</p>
+          <div class="chart-wrap"><canvas id="c_sup_time"></canvas></div>
+        </div>
+        <div class="panel col-4" data-loads>
+          <h3>Pipeline status</h3>
+          <p class="hint">Across the range.</p>
+          <div class="chart-wrap"><canvas id="c_sup_status"></canvas></div>
+        </div>
+        <div class="panel col-12" data-loads>
+          <h3>Verification pipeline</h3>
+          <p class="hint">One row per supervisor run. Click to expand the KYB + KYC sub-agent runs and the final decision.</p>
+          <div id="sup_tbl"></div>
+          <div id="sup_detail"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== KYB ===================== -->
+    <div class="tabpane" id="pane-kyb">
+      <div class="kpis" id="kyb_kpis" data-loads></div>
+      <div class="grid">
+        <div class="panel col-8" data-loads>
+          <h3>Runs over time</h3>
+          <p class="hint">KYB runs (risk/kyb-merchant-approval + risk/merchant-approval), stacked by status.</p>
+          <div class="chart-wrap"><canvas id="c_kyb_time"></canvas></div>
+        </div>
+        <div class="panel col-4" data-loads>
+          <h3>Stripe call outcomes</h3>
+          <p class="hint">Reliability of the Stripe tool.</p>
+          <div class="chart-wrap"><canvas id="c_kyb_stripe"></canvas></div>
+        </div>
+        <div class="panel col-12" data-loads>
+          <h3>Merchant Stripe snapshot</h3>
+          <p class="hint">Latest <span class="mono">stripe.get_account</span> + beneficial owners per merchant in range.</p>
+          <div id="kyb_snapshot"></div>
+        </div>
+        <div class="panel col-12" data-loads>
+          <h3>Cases</h3>
+          <p class="hint">One row per run. Click a row to load the full Stripe + enrichment evidence below.</p>
+          <div id="kyb_tbl"></div>
+          <div id="kyb_detail"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ===================== KYC ===================== -->
+    <div class="tabpane" id="pane-kyc">
+      <div class="kpis" id="kyc_kpis" data-loads></div>
+      <div class="grid">
+        <div class="panel col-4" data-loads>
+          <h3>Recommendations</h3>
+          <p class="hint">Agent screening outcomes.</p>
+          <div class="chart-wrap"><canvas id="c_kyc_rec"></canvas></div>
+        </div>
+        <div class="panel col-8" data-loads>
+          <h3>Runs over time</h3>
+          <p class="hint">Stacked by status.</p>
+          <div class="chart-wrap"><canvas id="c_kyc_time"></canvas></div>
+        </div>
+        <div class="panel col-12" data-loads>
+          <h3>Screening decisions</h3>
+          <p class="hint">Recorded decisions with the agent's Slack summary. Open a case below for the full file.</p>
+          <div id="kyc_decisions"></div>
+        </div>
+        <div class="panel col-12" data-loads>
+          <h3>Cases</h3>
+          <p class="hint">One row per run. Click a row to load the full screening evidence + case file below.</p>
+          <div id="kyc_tbl"></div>
+          <div id="kyc_detail"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+  <script src="config.js"></script>
+  <script src="assets/common.js"></script>
+  <script src="assets/risk.js"></script>
+  <script>
+    RevOps.nav('risk.html');
+    RevOps.applyChartDefaults();
+
+    const SUP = "'risk/risk-specialist'";
+    const KYB_AGENTS = "('risk/kyb-merchant-approval','risk/merchant-approval')";
+    const KYC_AGENT = "'risk/kyc-person-screening'";
+
+    let activeTab = 'supervisor';
+    // open-row state per tab, so auto-refresh doesn't collapse an open drawer
+    const open = { supervisor: null, kyb: null, kyc: null };
+
+    /* ============================ SUPERVISOR ============================ */
+    async function loadSupervisor(range) {
+      const { fromISO, toISO, bucket } = range;
+      const p = [fromISO, toISO];
+      document.getElementById('sup_detail').innerHTML = '';
+      open.supervisor = null;
+      RevOps.setLoading(true);
+      try {
+        const [kpi] = await RevOps.sql('agent', `
+          WITH sup AS (
+            SELECT run_id, status::text st, total_cost_usd FROM runs.agent_runs
+            WHERE agent_ref = ${SUP} AND started_at >= $1 AND started_at < $2
+          )
+          SELECT (SELECT count(*) FROM sup) total,
+                 (SELECT count(*) FROM sup WHERE st='completed') completed,
+                 (SELECT count(*) FROM sup WHERE st='failed') failed,
+                 (SELECT count(*) FROM sup WHERE st NOT IN ('completed','failed')) in_progress,
+                 (SELECT count(*) FROM runs.agent_runs c WHERE c.parent_run_id IN (SELECT run_id FROM sup)) subagents,
+                 (SELECT round(sum(total_cost_usd),2) FROM runs.agent_runs x
+                    WHERE x.run_id IN (SELECT run_id FROM sup) OR x.parent_run_id IN (SELECT run_id FROM sup)) pipeline_cost`, p);
+        const [dec] = await RevOps.sql('agent', `
+          SELECT count(*) decisions,
+                 count(*) FILTER (WHERE upper(recommendation) IN ('APPROVE','PURSUE')) approve,
+                 count(*) FILTER (WHERE upper(recommendation) IN ('DECLINE','REJECT','FLAG')) decline
+          FROM decisions.records WHERE agent_ref = ${SUP} AND created_at >= $1 AND created_at < $2`, p);
+
+        RevOps.kpis('sup_kpis', [
+          { label: 'Supervisor runs', value: RevOps.fmt.num(kpi.total),
+            sub: `${RevOps.fmt.num(kpi.completed)} completed · ${RevOps.fmt.num(kpi.in_progress)} in progress · ${RevOps.fmt.num(kpi.failed)} failed` },
+          { label: 'Sub-agents invoked', value: RevOps.fmt.num(kpi.subagents) },
+          { label: 'Final decisions', value: RevOps.fmt.num(dec.decisions),
+            sub: `${RevOps.fmt.num(dec.approve)} approve · ${RevOps.fmt.num(dec.decline)} decline` },
+          { label: 'Pipeline cost', value: RevOps.fmt.usd(kpi.pipeline_cost) }
+        ]);
+
+        // runs over time stacked by status
+        const ts = await RevOps.sql('agent', `
+          SELECT date_trunc($3, started_at) bucket, status::text status, count(*) c
+          FROM runs.agent_runs WHERE agent_ref = ${SUP} AND started_at >= $1 AND started_at < $2
+          GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
+        const pv = RevOps.pivot(ts, 'status', 'c');
+        RevOps.chart('c_sup_time', {
+          type: 'bar',
+          data: { labels: pv.labels.map(l => RevOps.bucketLabel(l, bucket)),
+            datasets: pv.order.map(s => ({ label: s, data: pv.datasetFor(s),
+              backgroundColor: RevOps.statusColor(s), borderRadius: 3 })) },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }), y: RevOps.axes.yStacked() },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        // status doughnut
+        const byStatus = await RevOps.sql('agent', `
+          SELECT status::text status, count(*) c FROM runs.agent_runs
+          WHERE agent_ref = ${SUP} AND started_at >= $1 AND started_at < $2 GROUP BY 1 ORDER BY c DESC`, p);
+        RevOps.chart('c_sup_status', {
+          type: 'doughnut',
+          data: { labels: byStatus.map(r => r.status),
+            datasets: [{ data: byStatus.map(r => Number(r.c)),
+              backgroundColor: byStatus.map(r => RevOps.statusColor(r.status)), borderWidth: 0 }] },
+          options: { cutout: '62%', plugins: { legend: { position: 'bottom' } } }
+        });
+
+        // pipeline table — one row per supervisor run, with KYB/KYC child rollup
+        const rows = await RevOps.sql('agent', `
+          SELECT r.run_id, r.subject_id, r.status::text status, r.started_at, r.total_cost_usd,
+                 r.final_output->>'merchant_name' merchant_name,
+                 (SELECT count(*) FROM runs.agent_runs c WHERE c.parent_run_id = r.run_id) n_children,
+                 (SELECT round(sum(total_cost_usd),4) FROM runs.agent_runs c WHERE c.parent_run_id = r.run_id) child_cost,
+                 kyb.status::text kyb_status,
+                 kyc.status::text kyc_status,
+                 kyc.final_output->>'overall_recommendation' kyc_rec,
+                 d.recommendation sup_rec
+          FROM runs.agent_runs r
+          LEFT JOIN LATERAL (SELECT status, final_output FROM runs.agent_runs c
+              WHERE c.parent_run_id = r.run_id AND c.agent_ref = 'risk/kyb-merchant-approval'
+              ORDER BY started_at DESC LIMIT 1) kyb ON true
+          LEFT JOIN LATERAL (SELECT status, final_output FROM runs.agent_runs c
+              WHERE c.parent_run_id = r.run_id AND c.agent_ref = 'risk/kyc-person-screening'
+              ORDER BY started_at DESC LIMIT 1) kyc ON true
+          LEFT JOIN LATERAL (SELECT recommendation FROM decisions.records d
+              WHERE d.run_id = r.run_id ORDER BY created_at DESC LIMIT 1) d ON true
+          WHERE r.agent_ref = ${SUP} AND r.started_at >= $1 AND r.started_at < $2
+          ORDER BY r.started_at DESC LIMIT 200`, p);
+        renderPipeline(rows);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load supervisor: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    function renderPipeline(rows) {
+      const el = document.getElementById('sup_tbl');
+      if (!rows.length) { el.innerHTML = '<div class="empty">No supervisor runs in this range.</div>'; return; }
+      const head = ['Started', 'Merchant', 'Status', 'Sub-agents', 'KYB', 'KYC', 'Decision', 'Pipeline cost']
+        .map(h => `<th>${h}</th>`).join('');
+      const body = rows.map(r => {
+        const pipeCost = Number(r.total_cost_usd || 0) + Number(r.child_cost || 0);
+        return `
+        <tr class="clickable" data-run="${RevOps.esc(r.run_id)}">
+          <td>${RevOps.fmt.dt(r.started_at)}</td>
+          <td>${RevOps.esc(r.merchant_name || r.subject_id)}</td>
+          <td>${RevOps.statusBadge(r.status)}</td>
+          <td class="num">${RevOps.fmt.num(r.n_children)}</td>
+          <td>${r.kyb_status ? RevOps.statusBadge(r.kyb_status) : '<span class="badge gray">—</span>'}</td>
+          <td>${r.kyc_status ? RevOps.statusBadge(r.kyc_status) : '<span class="badge gray">—</span>'}</td>
+          <td>${RevOps.recBadge(r.sup_rec || r.kyc_rec)}</td>
+          <td class="num">${RevOps.fmt.usd4(pipeCost)}</td>
+        </tr>`; }).join('');
+      el.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+      el.querySelectorAll('tr.clickable').forEach(tr => tr.addEventListener('click', () => {
+        const runId = tr.dataset.run;
+        const detail = document.getElementById('sup_detail');
+        if (open.supervisor === runId) { detail.innerHTML = ''; tr.classList.remove('open'); open.supervisor = null; return; }
+        el.querySelectorAll('tr.open').forEach(x => x.classList.remove('open'));
+        tr.classList.add('open'); open.supervisor = runId;
+        loadSupervisorDetail(runId, detail);
+      }));
+    }
+
+    // Expand a supervisor run: its decision/case file + the child KYB/KYC runs (each drillable).
+    async function loadSupervisorDetail(runId, container) {
+      container.innerHTML = '<div class="empty">Loading pipeline…</div>';
+      try {
+        const [meta] = await RevOps.sql('agent', `
+          SELECT r.final_output,
+                 d.recommendation, d.confidence_score, d.recommendation_payload rp,
+                 d.human_decision, d.agreed_with_agent
+          FROM runs.agent_runs r
+          LEFT JOIN LATERAL (SELECT * FROM decisions.records d WHERE d.run_id = r.run_id
+                             ORDER BY created_at DESC LIMIT 1) d ON true
+          WHERE r.run_id = $1`, [runId]);
+        const children = await RevOps.sql('agent', `
+          SELECT run_id, agent_ref, status::text status, started_at, total_cost_usd,
+                 final_output->>'overall_recommendation' rec
+          FROM runs.agent_runs WHERE parent_run_id = $1 ORDER BY started_at`, [runId]);
+
+        let html = '';
+        if (meta && meta.rp) {
+          html += `<div class="section-label">Supervisor decision &amp; case file</div>` +
+            RevOps.renderCaseFile(meta.rp, meta.recommendation, meta.confidence_score, meta.human_decision, meta.agreed_with_agent);
+        }
+
+        html += `<div class="section-label">Sub-agent runs</div>`;
+        if (!children.length) {
+          html += '<div class="empty">No sub-agent runs spawned yet.</div>';
+        } else {
+          html += children.map(c => {
+            const label = c.agent_ref.replace('risk/', '');
+            return `<div class="evidence">
+              <div class="ev-head clickable child-head" data-child="${RevOps.esc(c.run_id)}" style="cursor:pointer">
+                <span class="badge blue">${RevOps.esc(label)}</span>
+                ${RevOps.statusBadge(c.status)}
+                ${c.rec ? RevOps.recBadge(c.rec) : ''}
+                <span class="mono">${RevOps.esc(String(c.run_id).slice(0, 8))}</span>
+                <span class="when">${RevOps.fmt.dt(c.started_at)} · ${RevOps.fmt.usd4(c.total_cost_usd)}</span>
+              </div>
+              <div class="child-detail" id="cd-${RevOps.esc(c.run_id)}"></div>
+            </div>`;
+          }).join('');
+        }
+
+        if (meta && meta.final_output && Object.keys(meta.final_output).length)
+          html += `<div class="section-label">Supervisor final output</div>` +
+            `<div class="evidence"><div class="ev-head">final_output</div>${RevOps.jsonBlock(meta.final_output)}</div>`;
+
+        container.innerHTML = html;
+        // wire child drill-down (reuse the KYB/KYC evidence loader)
+        container.querySelectorAll('.child-head').forEach(h => h.addEventListener('click', () => {
+          const childId = h.dataset.child;
+          const cd = document.getElementById('cd-' + childId);
+          if (cd.dataset.loaded === '1') { cd.innerHTML = ''; cd.dataset.loaded = ''; return; }
+          cd.dataset.loaded = '1';
+          RevOps.loadCaseDetail(childId, cd);
+        }));
+        container.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      } catch (e) {
+        container.innerHTML = `<div class="banner show err" style="display:block">Failed to load pipeline: ${RevOps.esc(e.message)}</div>`;
+      }
+    }
+
+    /* ============================ KYB ============================ */
+    async function loadKyb(range) {
+      const { fromISO, toISO, bucket } = range;
+      const p = [fromISO, toISO];
+      document.getElementById('kyb_detail').innerHTML = '';
+      open.kyb = null;
+      RevOps.setLoading(true);
+      try {
+        const [kpi] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE status='completed') completed,
+                 count(*) FILTER (WHERE status='failed') failed,
+                 round(sum(total_cost_usd),2) cost
+          FROM runs.agent_runs WHERE agent_ref IN ${KYB_AGENTS} AND started_at >= $1 AND started_at < $2`, p);
+        const [st] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE t.status='succeeded') ok,
+                 count(*) FILTER (WHERE t.status::text LIKE 'failed%') failed
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name LIKE 'stripe.%'
+            AND t.started_at >= $1 AND t.started_at < $2`, p);
+        const stripeRate = Number(st.total) ? (100 * st.ok / st.total) : null;
+        RevOps.kpis('kyb_kpis', [
+          { label: 'KYB runs', value: RevOps.fmt.num(kpi.total),
+            sub: `${RevOps.fmt.num(kpi.completed)} completed · ${RevOps.fmt.num(kpi.failed)} failed` },
+          { label: 'Total cost', value: RevOps.fmt.usd(kpi.cost) },
+          { label: 'Stripe calls', value: RevOps.fmt.num(st.total) },
+          { label: 'Stripe success', value: stripeRate == null ? '—' : RevOps.fmt.pct(stripeRate),
+            tone: stripeRate == null ? '' : stripeRate >= 90 ? 'ok' : stripeRate >= 60 ? 'warn' : 'bad',
+            sub: `${RevOps.fmt.num(st.failed)} failed` }
+        ]);
+
+        const ts = await RevOps.sql('agent', `
+          SELECT date_trunc($3, started_at) bucket, status::text status, count(*) c
+          FROM runs.agent_runs WHERE agent_ref IN ${KYB_AGENTS} AND started_at >= $1 AND started_at < $2
+          GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
+        const pv = RevOps.pivot(ts, 'status', 'c');
+        RevOps.chart('c_kyb_time', {
+          type: 'bar',
+          data: { labels: pv.labels.map(l => RevOps.bucketLabel(l, bucket)),
+            datasets: pv.order.map(s => ({ label: s, data: pv.datasetFor(s),
+              backgroundColor: RevOps.statusColor(s), borderRadius: 3 })) },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }), y: RevOps.axes.yStacked() },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const sx = await RevOps.sql('agent', `
+          SELECT t.tool_name, t.status::text status, count(*) c
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name LIKE 'stripe.%'
+            AND t.started_at >= $1 AND t.started_at < $2
+          GROUP BY 1,2 ORDER BY c DESC`, p);
+        RevOps.chart('c_kyb_stripe', {
+          type: 'doughnut',
+          data: { labels: sx.map(r => r.tool_name + ' · ' + r.status),
+            datasets: [{ data: sx.map(r => Number(r.c)),
+              backgroundColor: sx.map(r => r.status === 'succeeded' ? RevOps.colorFor(r.tool_name) : '#f87171'),
+              borderWidth: 0 }] },
+          options: { cutout: '60%', plugins: { legend: { position: 'bottom', labels: { font: { size: 10 } } } } }
+        });
+
+        const snap = await RevOps.sql('agent', `
+          SELECT DISTINCT ON (r.subject_id) r.subject_id, t.result, t.started_at
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name='stripe.get_account' AND t.status='succeeded'
+            AND t.started_at >= $1 AND t.started_at < $2
+          ORDER BY r.subject_id, t.started_at DESC`, p);
+        const persons = await RevOps.sql('agent', `
+          SELECT DISTINCT ON (r.subject_id) r.subject_id, t.result, t.started_at
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name='stripe.list_account_persons' AND t.status='succeeded'
+            AND t.started_at >= $1 AND t.started_at < $2
+          ORDER BY r.subject_id, t.started_at DESC`, p);
+        const personsBy = Object.fromEntries(persons.map(r => [r.subject_id, r.result]));
+        const snapEl = document.getElementById('kyb_snapshot');
+        if (!snap.length) snapEl.innerHTML = '<div class="empty">No successful Stripe account lookups in range.</div>';
+        else snapEl.innerHTML = snap.map(r =>
+          RevOps.renderToolCall({ tool_name: 'stripe.get_account', status: 'succeeded', result: r.result, started_at: r.started_at, tool_args: { account_id: 'merchant ' + r.subject_id } }) +
+          (personsBy[r.subject_id] ? RevOps.renderToolCall({ tool_name: 'stripe.list_account_persons', status: 'succeeded', result: personsBy[r.subject_id], started_at: r.started_at, tool_args: {} }) : '')
+        ).join('');
+
+        const cases = await RevOps.sql('agent', `
+          SELECT r.run_id, r.agent_ref, r.subject_id, r.status::text status, r.started_at, r.total_cost_usd,
+                 r.final_output->>'merchant_name' merchant_name,
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name LIKE 'stripe.%') stripe_calls,
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name IN
+                    ('sanctions.check','peps.check','sos.entity_search','sos.officer_search','sec.search','domain.whois','domain.wayback','web.search','web.fetch')) enrich_calls
+          FROM runs.agent_runs r
+          WHERE r.agent_ref IN ${KYB_AGENTS} AND r.started_at >= $1 AND r.started_at < $2
+          ORDER BY r.started_at DESC LIMIT 200`, p);
+        renderKybCases(cases);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load KYB: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    function renderKybCases(rows) {
+      const el = document.getElementById('kyb_tbl');
+      if (!rows.length) { el.innerHTML = '<div class="empty">No KYB runs in this range.</div>'; return; }
+      const head = ['Started', 'Agent', 'Merchant', 'Status', 'Stripe', 'Screening', 'Cost'].map(h => `<th>${h}</th>`).join('');
+      const body = rows.map(r => `
+        <tr class="clickable" data-run="${RevOps.esc(r.run_id)}">
+          <td>${RevOps.fmt.dt(r.started_at)}</td>
+          <td><span class="mono">${RevOps.esc(r.agent_ref.replace('risk/', ''))}</span></td>
+          <td>${RevOps.esc(r.merchant_name || r.subject_id)}</td>
+          <td>${RevOps.statusBadge(r.status)}</td>
+          <td class="num">${RevOps.fmt.num(r.stripe_calls)}</td>
+          <td class="num">${RevOps.fmt.num(r.enrich_calls)}</td>
+          <td class="num">${RevOps.fmt.usd4(r.total_cost_usd)}</td>
+        </tr>`).join('');
+      el.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+      el.querySelectorAll('tr.clickable').forEach(tr => tr.addEventListener('click', () => {
+        const runId = tr.dataset.run;
+        const detail = document.getElementById('kyb_detail');
+        if (open.kyb === runId) { detail.innerHTML = ''; tr.classList.remove('open'); open.kyb = null; return; }
+        el.querySelectorAll('tr.open').forEach(x => x.classList.remove('open'));
+        tr.classList.add('open'); open.kyb = runId;
+        RevOps.loadCaseDetail(runId, detail);
+      }));
+    }
+
+    /* ============================ KYC ============================ */
+    async function loadKyc(range) {
+      const { fromISO, toISO, bucket } = range;
+      const p = [fromISO, toISO];
+      document.getElementById('kyc_detail').innerHTML = '';
+      open.kyc = null;
+      RevOps.setLoading(true);
+      try {
+        const [kpi] = await RevOps.sql('agent', `
+          SELECT count(*) total,
+                 count(*) FILTER (WHERE status='completed') completed,
+                 count(*) FILTER (WHERE status='failed') failed,
+                 count(*) FILTER (WHERE final_output ? 'overall_recommendation') recommended
+          FROM runs.agent_runs WHERE agent_ref = ${KYC_AGENT} AND started_at >= $1 AND started_at < $2`, p);
+        const [scr] = await RevOps.sql('agent', `
+          SELECT count(*) FILTER (WHERE t.tool_name='sanctions.check' AND (t.result->>'hit')::boolean) sanctions_hits,
+                 count(*) FILTER (WHERE t.tool_name='peps.check' AND (t.result->>'hit')::boolean) pep_hits,
+                 count(*) FILTER (WHERE t.tool_name IN ('sanctions.check','peps.check')) screen_calls
+          FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
+          WHERE r.agent_ref = ${KYC_AGENT} AND t.started_at >= $1 AND t.started_at < $2`, p);
+        const [dec] = await RevOps.sql('agent', `
+          SELECT round(avg(confidence_score)::numeric,2) avg_conf, count(*) decisions
+          FROM decisions.records WHERE agent_ref = ${KYC_AGENT} AND created_at >= $1 AND created_at < $2`, p);
+
+        RevOps.kpis('kyc_kpis', [
+          { label: 'KYC runs', value: RevOps.fmt.num(kpi.total),
+            sub: `${RevOps.fmt.num(kpi.completed)} completed · ${RevOps.fmt.num(kpi.failed)} failed` },
+          { label: 'Recommendations', value: RevOps.fmt.num(kpi.recommended) },
+          { label: 'Sanctions screens', value: RevOps.fmt.num(scr.screen_calls),
+            sub: `${RevOps.fmt.num(scr.sanctions_hits)} sanctions · ${RevOps.fmt.num(scr.pep_hits)} PEP hits` },
+          { label: 'Sanctions / PEP hits', value: RevOps.fmt.num(Number(scr.sanctions_hits) + Number(scr.pep_hits)),
+            tone: (Number(scr.sanctions_hits) + Number(scr.pep_hits)) > 0 ? 'bad' : 'ok' },
+          { label: 'Avg confidence', value: dec.avg_conf == null ? '—' : Number(dec.avg_conf).toFixed(2),
+            sub: `${RevOps.fmt.num(dec.decisions)} decisions` }
+        ]);
+
+        const recs = await RevOps.sql('agent', `
+          SELECT COALESCE(final_output->>'overall_recommendation','(none)') rec, count(*) c
+          FROM runs.agent_runs WHERE agent_ref = ${KYC_AGENT} AND started_at >= $1 AND started_at < $2
+          GROUP BY 1 ORDER BY c DESC`, p);
+        const recColor = { APPROVE: '#34d399', EDD: '#fbbf24', DECLINE: '#f87171', FLAG: '#f87171', '(none)': '#7f8aa0' };
+        RevOps.chart('c_kyc_rec', {
+          type: 'doughnut',
+          data: { labels: recs.map(r => r.rec),
+            datasets: [{ data: recs.map(r => Number(r.c)),
+              backgroundColor: recs.map(r => recColor[r.rec] || RevOps.colorFor(r.rec)), borderWidth: 0 }] },
+          options: { cutout: '62%', plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const ts = await RevOps.sql('agent', `
+          SELECT date_trunc($3, started_at) bucket, status::text status, count(*) c
+          FROM runs.agent_runs WHERE agent_ref = ${KYC_AGENT} AND started_at >= $1 AND started_at < $2
+          GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
+        const pv = RevOps.pivot(ts, 'status', 'c');
+        RevOps.chart('c_kyc_time', {
+          type: 'bar',
+          data: { labels: pv.labels.map(l => RevOps.bucketLabel(l, bucket)),
+            datasets: pv.order.map(s => ({ label: s, data: pv.datasetFor(s),
+              backgroundColor: RevOps.statusColor(s), borderRadius: 3 })) },
+          options: { scales: { x: RevOps.axes.x({ stacked: true }), y: RevOps.axes.yStacked() },
+            plugins: { legend: { position: 'bottom' } } }
+        });
+
+        const decisions = await RevOps.sql('agent', `
+          SELECT created_at, subject_id, recommendation, confidence_score, human_decision, agreed_with_agent,
+                 recommendation_payload->>'slack_summary' summary
+          FROM decisions.records WHERE agent_ref = ${KYC_AGENT} AND created_at >= $1 AND created_at < $2
+          ORDER BY created_at DESC`, p);
+        const decEl = document.getElementById('kyc_decisions');
+        if (!decisions.length) decEl.innerHTML = '<div class="empty">No recorded decisions in range.</div>';
+        else decEl.innerHTML = decisions.map(d => `
+          <div class="evidence">
+            <div class="ev-head">${RevOps.recBadge(d.recommendation)}
+              <span class="mono">${RevOps.esc(d.subject_id)}</span>
+              <span class="when">${RevOps.fmt.dt(d.created_at)}</span></div>
+            <div style="margin-bottom:8px;font-size:12px;color:var(--muted)">
+              Confidence ${d.confidence_score == null ? '—' : Number(d.confidence_score).toFixed(2)}
+              · Human: ${d.human_decision ? RevOps.recBadge(d.human_decision) : '—'}
+              · Agreed: ${d.agreed_with_agent == null ? '—' : (d.agreed_with_agent ? RevOps.badge('yes', 'green') : RevOps.badge('no', 'red'))}
+            </div>
+            ${d.summary ? `<div class="slack-summary">${RevOps.esc(d.summary)}</div>` : ''}
+          </div>`).join('');
+
+        const cases = await RevOps.sql('agent', `
+          SELECT r.run_id, r.subject_id, r.status::text status, r.started_at, r.total_cost_usd,
+                 COALESCE(r.final_output->>'overall_recommendation', d.recommendation) recommendation,
+                 r.final_output->>'merchant_name' merchant_name,
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name IN
+                    ('sanctions.check','peps.check','sos.entity_search','sos.officer_search','sec.search','domain.whois','domain.wayback','web.search','web.fetch')) enrich_calls,
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name LIKE 'stripe.%') stripe_calls
+          FROM runs.agent_runs r
+          LEFT JOIN LATERAL (SELECT recommendation FROM decisions.records d WHERE d.run_id=r.run_id ORDER BY created_at DESC LIMIT 1) d ON true
+          WHERE r.agent_ref = ${KYC_AGENT} AND r.started_at >= $1 AND r.started_at < $2
+          ORDER BY r.started_at DESC LIMIT 200`, p);
+        renderKycCases(cases);
+
+        RevOps.banner('err', null);
+        RevOps.setStatus('Live · <b>' + new Date().toLocaleTimeString() + '</b>');
+      } catch (e) {
+        RevOps.banner('err', 'Failed to load KYC: ' + e.message);
+      } finally {
+        RevOps.setLoading(false);
+      }
+    }
+
+    function renderKycCases(rows) {
+      const el = document.getElementById('kyc_tbl');
+      if (!rows.length) { el.innerHTML = '<div class="empty">No KYC runs in this range.</div>'; return; }
+      const head = ['Started', 'Merchant', 'Recommendation', 'Status', 'Screening', 'Stripe', 'Cost'].map(h => `<th>${h}</th>`).join('');
+      const body = rows.map(r => `
+        <tr class="clickable" data-run="${RevOps.esc(r.run_id)}">
+          <td>${RevOps.fmt.dt(r.started_at)}</td>
+          <td>${RevOps.esc(r.merchant_name || r.subject_id)}</td>
+          <td>${RevOps.recBadge(r.recommendation)}</td>
+          <td>${RevOps.statusBadge(r.status)}</td>
+          <td class="num">${RevOps.fmt.num(r.enrich_calls)}</td>
+          <td class="num">${RevOps.fmt.num(r.stripe_calls)}</td>
+          <td class="num">${RevOps.fmt.usd4(r.total_cost_usd)}</td>
+        </tr>`).join('');
+      el.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+      el.querySelectorAll('tr.clickable').forEach(tr => tr.addEventListener('click', () => {
+        const runId = tr.dataset.run;
+        const detail = document.getElementById('kyc_detail');
+        if (open.kyc === runId) { detail.innerHTML = ''; tr.classList.remove('open'); open.kyc = null; return; }
+        el.querySelectorAll('tr.open').forEach(x => x.classList.remove('open'));
+        tr.classList.add('open'); open.kyc = runId;
+        RevOps.loadCaseDetail(runId, detail);
+      }));
+    }
+
+    /* ============================ tabs + wiring ============================ */
+    const LOADERS = { supervisor: loadSupervisor, kyb: loadKyb, kyc: loadKyc };
+    const loadedFor = { supervisor: null, kyb: null, kyc: null }; // range key last loaded per tab
+
+    function loadActive(force) {
+      const r = dr.get();
+      if (!force && loadedFor[activeTab] === r.key + r.fromISO) return;
+      loadedFor[activeTab] = r.key + r.fromISO;
+      LOADERS[activeTab](r);
+    }
+
+    function showTab(name) {
+      activeTab = name;
+      document.querySelectorAll('#tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === name));
+      ['supervisor', 'kyb', 'kyc'].forEach(t =>
+        document.getElementById('pane-' + t).classList.toggle('active', t === name));
+      loadActive(false);
+    }
+    document.querySelectorAll('#tabs button').forEach(b => b.addEventListener('click', () => showTab(b.dataset.tab)));
+
+    // DateRange fires onChange immediately on creation (default 7d) → loads the supervisor tab.
+    const dr = RevOps.DateRange('range', () => { loadedFor[activeTab] = null; loadActive(true); });
+    RevOps.autoRefresh(() => { if (!open[activeTab]) loadActive(true); }, 60000);
+  </script>
+</body>
+</html>

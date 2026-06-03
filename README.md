@@ -14,6 +14,7 @@ No build step — plain HTML + Chart.js + a small shared runtime.
 | `tool_calls.html` | `runs.tool_calls` | Tool success rates, latency by tool, top tools, error mix |
 | `webhooks.html` | `webhook_events` (webhooks DB) | Ingestion by source, throughput, processed/failed rates, recent failures |
 | `decisions.html` | `decisions.records`, `runs.approvals` | Agent-vs-human agreement, recommendations, approval SLA |
+| `risk.html` | `runs.agent_runs`, `runs.tool_calls`, `decisions.records` | Merchant Verification — tabbed: the **Risk Specialist** supervisor pipeline (drills into the KYB/KYC child runs it spawns via `parent_run_id`), plus **KYB** (Stripe + beneficial-owner evidence) and **KYC** (sanctions/PEP screening, recommendations, case files) |
 
 Every dashboard has a global date-range control: **Day / Week / 2 Weeks / 30 Days**
 presets plus a custom from→to range. Time-series granularity auto-selects

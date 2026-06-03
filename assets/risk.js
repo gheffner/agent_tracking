@@ -1,5 +1,5 @@
 /* RevOps dashboards — KYB/KYC evidence rendering helpers.
- * Loaded after common.js on kyb.html / kyc.html. Adds renderers under RevOps.
+ * Loaded after common.js on risk.html (KYB/KYC/supervisor). Adds renderers under RevOps.
  * All DB-sourced strings are escaped via RevOps.esc before hitting innerHTML.
  */
 (function () {
