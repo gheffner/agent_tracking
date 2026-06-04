@@ -1,6 +1,6 @@
-# RevOps Agent Platform — Observability Hub
+# GTM Agent Platform — Observability Hub
 
-Static dashboards for the RevOps agent platform. Reads live from the production
+Static dashboards for the GTM agent platform. Reads live from the production
 RDS via the internal SQL proxy (two databases: `agent_platform` and `webhooks`).
 No build step — plain HTML + Chart.js + a small shared runtime.
 

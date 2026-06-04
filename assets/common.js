@@ -1,4 +1,4 @@
-/* RevOps Agent Platform dashboards — shared runtime.
+/* GTM Agent Platform dashboards — shared runtime.
  *
  * Exposes a single global: window.RevOps
  *
@@ -197,7 +197,7 @@
       `<a href="${p.href}" class="${p.href === active ? 'active' : ''}">${p.label}</a>`).join('');
     const html = `
       <nav class="nav">
-        <a class="nav-brand" href="index.html"><span class="dot"></span>RevOps Agent Platform</a>
+        <a class="nav-brand" href="index.html"><span class="dot"></span>GTM Agent Platform</a>
         <div class="nav-links">${links}</div>
         <div class="nav-status" id="nav-status"></div>
       </nav>`;

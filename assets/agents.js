@@ -1,4 +1,4 @@
-/* RevOps dashboards — Agents command room helpers.
+/* GTM dashboards — Agents command room helpers.
  * Loaded after common.js (and risk.js) on agents.html. Adds renderers + the
  * write (toggle) logic under RevOps. Self-contained esc/json so it works even
  * against a stale cached common.js.

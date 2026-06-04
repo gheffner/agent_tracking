@@ -1,4 +1,4 @@
-/* RevOps Agent Platform — observability console
+/* GTM Agent Platform — observability console
    Shared design system. Dark theme, indigo/cyan accents. */
 
 :root {
@@ -284,6 +284,19 @@ table.data td.num, table.data th.num { text-align: right; font-variant-numeric: 
   letter-spacing: .06em;
   color: var(--muted);
   margin: 30px 0 14px;
+}
+/* Error category — visually distinct so failed calls are easy to track. */
+.section-label.err {
+  color: var(--danger);
+  border-left: 3px solid var(--danger);
+  padding-left: 9px;
+}
+.section-label.err .count {
+  background: rgba(248,113,113,.14);
+  border-radius: 10px;
+  padding: 1px 8px;
+  margin-left: 8px;
+  font-size: 12px;
 }
 
 /* ---------- Risk pages (KYB/KYC): evidence & case detail ---------- */

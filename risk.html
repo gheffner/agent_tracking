@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Merchant Verification · RevOps Agent Platform</title>
+  <title>Merchant Verification · GTM Agent Platform</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
   <link rel="stylesheet" href="assets/styles.css">
@@ -332,7 +332,7 @@
                  count(*) FILTER (WHERE t.status='succeeded') ok,
                  count(*) FILTER (WHERE t.status::text LIKE 'failed%') failed
           FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
-          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name LIKE 'stripe.%'
+          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name LIKE 'stripe.%' AND t.tool_name <> 'stripe.get_customer'
             AND t.started_at >= $1 AND t.started_at < $2`, p);
         const stripeRate = Number(st.total) ? (100 * st.ok / st.total) : null;
         RevOps.kpis('kyb_kpis', [
@@ -362,7 +362,7 @@
         const sx = await RevOps.sql('agent', `
           SELECT t.tool_name, t.status::text status, count(*) c
           FROM runs.tool_calls t JOIN runs.agent_runs r ON r.run_id = t.run_id
-          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name LIKE 'stripe.%'
+          WHERE r.agent_ref IN ${KYB_AGENTS} AND t.tool_name LIKE 'stripe.%' AND t.tool_name <> 'stripe.get_customer'
             AND t.started_at >= $1 AND t.started_at < $2
           GROUP BY 1,2 ORDER BY c DESC`, p);
         RevOps.chart('c_kyb_stripe', {
@@ -397,7 +397,7 @@
         const cases = await RevOps.sql('agent', `
           SELECT r.run_id, r.agent_ref, r.subject_id, r.status::text status, r.started_at, r.total_cost_usd,
                  r.final_output->>'merchant_name' merchant_name,
-                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name LIKE 'stripe.%') stripe_calls,
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name LIKE 'stripe.%' AND t.tool_name <> 'stripe.get_customer') stripe_calls,
                  (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name IN
                     ('sanctions.check','peps.check','sos.entity_search','sos.officer_search','sec.search','domain.whois','domain.wayback','web.search','web.fetch')) enrich_calls
           FROM runs.agent_runs r
@@ -528,7 +528,7 @@
                  r.final_output->>'merchant_name' merchant_name,
                  (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name IN
                     ('sanctions.check','peps.check','sos.entity_search','sos.officer_search','sec.search','domain.whois','domain.wayback','web.search','web.fetch')) enrich_calls,
-                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name LIKE 'stripe.%') stripe_calls
+                 (SELECT count(*) FROM runs.tool_calls t WHERE t.run_id=r.run_id AND t.tool_name LIKE 'stripe.%' AND t.tool_name <> 'stripe.get_customer') stripe_calls
           FROM runs.agent_runs r
           LEFT JOIN LATERAL (SELECT recommendation FROM decisions.records d WHERE d.run_id=r.run_id ORDER BY created_at DESC LIMIT 1) d ON true
           WHERE r.agent_ref = ${KYC_AGENT} AND r.started_at >= $1 AND r.started_at < $2

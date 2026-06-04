@@ -1,4 +1,4 @@
-/* RevOps dashboards — KYB/KYC evidence rendering helpers.
+/* GTM dashboards — KYB/KYC evidence rendering helpers.
  * Loaded after common.js on risk.html (KYB/KYC/supervisor). Adds renderers under RevOps.
  * All DB-sourced strings are escaped via RevOps.esc before hitting innerHTML.
  */
@@ -37,6 +37,14 @@
       ${when ? `<span class="when">${esc(R.fmt.dt(when))}</span>` : ''}</div>${bodyHtml}</div>`;
   }
   R.jsonBlock = (obj) => `<pre class="json">${esc(JSON.stringify(obj, null, 2))}</pre>`;
+
+  /* A call failed if it carries an error object, a non-succeeded status, or a
+   * result that explicitly reports ok:false (permission/4xx payloads). */
+  function isFailed(call) {
+    return (call.error && Object.keys(call.error).length) ||
+      (call.status && call.status !== 'succeeded') ||
+      (call.result && call.result.ok === false);
+  }
 
   /* ---- Stripe: get_account ---- */
   function stripeAccount(res) {
@@ -99,18 +107,29 @@
       <th>ID#</th><th>SSN last4</th><th>Verification</th></tr></thead><tbody>${rows}</tbody></table></div>`;
   }
 
-  /* ---- Stripe: get_customer (often a 403 permission error) ---- */
-  function stripeCustomer(res) {
-    if (!res) return '<div class="empty">No result.</div>';
-    if (res.ok === false) return errBlock(res);
-    return R.jsonBlock(res);
-  }
-
   function errBlock(res) {
     const e = res && res.error ? res.error : {};
     const msg = e.message || (res && res.message) || 'Call failed';
     const status = res && res.status ? ` (HTTP ${esc(res.status)})` : '';
     return `<div class="banner show err" style="display:block">⚠ ${esc(msg)}${status}</div>` +
+      (e.request_log_url ? `<div style="margin-top:6px"><a href="${esc(e.request_log_url)}" target="_blank" rel="noopener">Stripe request log ↗</a></div>` : '');
+  }
+
+  /* ---- Failed tool call: surface the real error ----
+   * A failed call (status failed/failed_permanent) stores result=NULL and
+   * puts the detail in the separate `error` column ({name, message}).
+   * Result-embedded errors ({ok:false, error:{…}, status}) also occur on
+   * permission/4xx responses. Render whichever is present so an errored
+   * Stripe (or screening) call is never a silent "No result." in the drawer. */
+  function failBlock(call) {
+    const fromCol = call.error && Object.keys(call.error).length ? call.error : null;
+    const fromRes = call.result && call.result.ok === false
+      ? (call.result.error || call.result) : null;
+    const e = fromCol || fromRes || {};
+    const name = e.name ? esc(e.name) + ': ' : '';
+    const msg = e.message || (call.result && call.result.message) || 'Call failed';
+    const status = call.result && call.result.status ? ` (HTTP ${esc(call.result.status)})` : '';
+    return `<div class="banner show err" style="display:block">⚠ ${name}${esc(msg)}${status}</div>` +
       (e.request_log_url ? `<div style="margin-top:6px"><a href="${esc(e.request_log_url)}" target="_blank" rel="noopener">Stripe request log ↗</a></div>` : '');
   }
 
@@ -201,10 +220,10 @@
     const tool = call.tool_name;
     const res = call.result;
     let body;
-    if (tool === 'stripe.get_account') body = stripeAccount(res);
+    if (isFailed(call)) body = failBlock(call);
+    else if (tool === 'stripe.get_account') body = stripeAccount(res);
     else if (tool === 'stripe.list_account_persons') body = stripePersons(res);
-    else if (tool === 'stripe.get_customer') body = stripeCustomer(res);
-    else if (tool.startsWith('stripe.')) body = res && res.ok === false ? errBlock(res) : R.jsonBlock(res);
+    else if (tool.startsWith('stripe.')) body = R.jsonBlock(res);
     else body = screening(tool, res);
     const argHint = call.tool_args && (call.tool_args.account_id || call.tool_args.customer_id || call.tool_args.query || call.tool_args.name);
     return ev(tool, argHint, call.started_at,
@@ -234,7 +253,7 @@
     container.innerHTML = '<div class="empty">Loading case evidence…</div>';
     try {
       const calls = await R.sql('agent',
-        `SELECT tool_name, status::text status, tool_args, result, started_at
+        `SELECT tool_name, status::text status, tool_args, result, error, started_at
          FROM runs.tool_calls WHERE run_id = $1 ORDER BY started_at`, [runId]);
       const [meta] = await R.sql('agent',
         `SELECT r.final_output,
@@ -250,9 +269,15 @@
         html += `<div class="section-label">Decision &amp; case file</div>` +
           R.renderCaseFile(meta.rp, meta.recommendation, meta.confidence_score, meta.human_decision, meta.agreed_with_agent);
       }
-      const stripe = calls.filter(c => c.tool_name.startsWith('stripe.'));
+      // stripe.get_customer is excluded everywhere in the UI — the restricted
+      // key lacks scope for it, so it's noise rather than evidence.
+      const stripe = calls.filter(c => c.tool_name.startsWith('stripe.') && c.tool_name !== 'stripe.get_customer');
+      const stripeErrors = stripe.filter(isFailed);
+      const stripeOk = stripe.filter(c => !isFailed(c));
       const enrich = calls.filter(c => ENRICH.has(c.tool_name));
-      if (stripe.length) html += `<div class="section-label">Stripe data retrieved</div>` + stripe.map(R.renderToolCall).join('');
+      // Errors grouped in their own category up top so they're easy to track.
+      if (stripeErrors.length) html += `<div class="section-label err">Stripe errors<span class="count">${stripeErrors.length}</span></div>` + stripeErrors.map(R.renderToolCall).join('');
+      if (stripeOk.length) html += `<div class="section-label">Stripe data retrieved</div>` + stripeOk.map(R.renderToolCall).join('');
       if (enrich.length) html += `<div class="section-label">Screening &amp; enrichment</div>` + enrich.map(R.renderToolCall).join('');
       if (meta && meta.final_output && Object.keys(meta.final_output).length)
         html += `<div class="section-label">Agent final output</div>` + ev('final_output', '', null, R.jsonBlock(meta.final_output));
