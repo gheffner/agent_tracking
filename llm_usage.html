@@ -97,7 +97,7 @@
 
         // Spend over time stacked by model
         const ct = await RevOps.sql('agent', `
-          SELECT date_trunc($3, started_at) bucket, model_id, round(sum(cost_usd),4) c
+          SELECT ${RevOps.bucketExpr('started_at', '$3')} bucket, model_id, round(sum(cost_usd),4) c
           FROM runs.llm_calls WHERE started_at >= $1 AND started_at < $2
           GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
         const pv = RevOps.pivot(ct, 'model_id', 'c');
@@ -144,7 +144,7 @@
 
         // Tokens over time
         const tt = await RevOps.sql('agent', `
-          SELECT date_trunc($3, started_at) bucket,
+          SELECT ${RevOps.bucketExpr('started_at', '$3')} bucket,
                  sum(tokens_input) tin, sum(tokens_output) tout, sum(tokens_cache_read) cache
           FROM runs.llm_calls WHERE started_at >= $1 AND started_at < $2
           GROUP BY 1 ORDER BY 1`, [...p, bucket]);

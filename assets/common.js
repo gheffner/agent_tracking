@@ -14,6 +14,19 @@
 (function () {
   const RevOps = {};
 
+  /* The platform operates in US/Eastern. The DB session runs in UTC, so
+   * date_trunc() on a timestamptz buckets by UTC days — which renders a day
+   * behind once formatted in an Eastern browser (UTC midnight = prev-day 8pm).
+   * Pin all time-series bucketing AND labels to this zone so the graph's days
+   * line up with the run tables, regardless of the viewer's browser timezone. */
+  const TZ = 'America/New_York';
+  RevOps.TZ = TZ;
+  /* tz-aware date_trunc fragment for chart queries: truncate in ET, then
+   * re-anchor to ET so it serializes to the correct UTC instant. Usage:
+   *   `SELECT ${RevOps.bucketExpr('started_at', '$3')} bucket, ...` */
+  RevOps.bucketExpr = (col, unitParam) =>
+    `date_trunc(${unitParam}, ${col} AT TIME ZONE '${TZ}') AT TIME ZONE '${TZ}'`;
+
   /* ----------------------------- SQL client ----------------------------- */
   async function sql(db, query, params = []) {
     if (!window.SQL_CONFIG) {
@@ -59,7 +72,7 @@
     dt: (s) => {
       if (!s) return '—';
       const d = new Date(s);
-      return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+      return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', timeZone: TZ });
     },
     rel: (s) => {
       if (!s) return '—';
@@ -284,9 +297,9 @@
   /* Label a time bucket according to granularity. */
   RevOps.bucketLabel = function (iso, bucket) {
     const d = new Date(iso);
-    if (bucket === 'hour') return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit' });
-    if (bucket === 'week') return 'wk ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+    if (bucket === 'hour') return d.toLocaleString('en-US', { month: 'short', day: 'numeric', hour: '2-digit', timeZone: TZ });
+    if (bucket === 'week') return 'wk ' + d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: TZ });
+    return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', timeZone: TZ });
   };
 
   /* Pivot tall rows into aligned stacked-chart datasets.

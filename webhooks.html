@@ -89,7 +89,7 @@
 
         // Over time stacked by source
         const ts = await RevOps.sql('webhooks', `
-          SELECT date_trunc($3, received_at) bucket, source, count(*) c
+          SELECT ${RevOps.bucketExpr('received_at', '$3')} bucket, source, count(*) c
           FROM webhook_events WHERE received_at >= $1 AND received_at < $2
           GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
         const pv = RevOps.pivot(ts, 'source', 'c');

@@ -84,7 +84,7 @@
 
         // Over time stacked by status
         const ts = await RevOps.sql('agent', `
-          SELECT date_trunc($3, started_at) bucket, status::text status, count(*) c
+          SELECT ${RevOps.bucketExpr('started_at', '$3')} bucket, status::text status, count(*) c
           FROM runs.tool_calls WHERE started_at >= $1 AND started_at < $2
           GROUP BY 1,2 ORDER BY 1`, [...p, bucket]);
         const pv = RevOps.pivot(ts, 'status', 'c');
